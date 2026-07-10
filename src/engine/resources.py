@@ -34,9 +34,9 @@ def resource_path(relative: str | Path) -> Path:
     """Resolve a bundled resource path.
 
     Example:
-        resource_path("assets/icon.png")
+        resource_path("icon.png")
 
-    Resolves to ``<project root>/assets/icon.png`` from source and to
-    ``<_MEIPASS>/assets/icon.png`` inside a packaged build.
+    Resolves to ``<project root>/icon.png`` from source and to
+    ``<_MEIPASS>/icon.png`` inside a packaged build.
     """
     return get_base_path() / relative

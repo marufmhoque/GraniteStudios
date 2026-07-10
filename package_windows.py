@@ -65,13 +65,21 @@ def build() -> None:
         "--add-data", f"{PROJECT_ROOT / 'src'}{sep}src",
     ]
 
-    # Include the assets folder (icons, etc.) only if it exists.
+    # App icon: --icon sets the .exe/window icon (PyInstaller converts a
+    # .png to .ico automatically via Pillow). Also add it as bundled data
+    # at the bundle root so resource_path("icon.png") finds it at runtime
+    # for the splash screen and window icon.
+    icon_png = PROJECT_ROOT / "icon.png"
+    if icon_png.exists():
+        args += ["--icon", str(icon_png)]
+        args += ["--add-data", f"{icon_png}{sep}."]
+    else:
+        print(f"Warning: {icon_png} not found — building without a custom icon.")
+
+    # Include the assets folder (extra art, fonts, etc.) only if it exists.
     assets_dir = PROJECT_ROOT / "assets"
     if assets_dir.is_dir():
         args += ["--add-data", f"{assets_dir}{sep}assets"]
-        icon_ico = assets_dir / "icon.ico"
-        if icon_ico.exists():
-            args += ["--icon", str(icon_ico)]
 
     for mod in HIDDEN_IMPORTS:
         args += ["--hidden-import", mod]

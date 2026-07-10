@@ -369,10 +369,10 @@ class MainWindow(QMainWindow):
         self.resize(1360, 860)
         self.setStyleSheet(CRIMSON_GRANITE_STYLESHEET)
 
-        # Resolve the app icon via resource_path so it's found both from
-        # source and inside a packaged .exe / .app bundle. Optional — the
-        # app runs fine with no icon file present.
-        icon_path = resource_path("assets/icon.png")
+        # Resolve the app icon via resource_path, which checks sys._MEIPASS
+        # so this works identically from source and inside a packaged
+        # .exe / .app bundle. Optional — the app runs fine without it.
+        icon_path = resource_path("icon.png")
         if icon_path.exists():
             self.setWindowIcon(QIcon(str(icon_path)))
 
@@ -425,8 +425,24 @@ class MainWindow(QMainWindow):
         sidebar.setObjectName("Sidebar")
         sidebar.setFixedWidth(230)
         layout = QVBoxLayout(sidebar)
-        layout.setContentsMargins(14, 20, 14, 20)
+        # Extra top padding (>= 20px) so the brand icon has room to breathe
+        # instead of sitting flush against the window's top edge.
+        layout.setContentsMargins(14, 28, 14, 20)
         layout.setSpacing(4)
+
+        icon_path = resource_path("icon.png")
+        if icon_path.exists():
+            brand_icon = QLabel()
+            brand_icon.setPixmap(
+                QPixmap(str(icon_path)).scaled(
+                    48,
+                    48,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            )
+            layout.addWidget(brand_icon)
+            layout.addSpacing(12)
 
         logo = QLabel("GRANITE\nSTUDIOS")
         logo_font = QFont()
