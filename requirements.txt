@@ -1,0 +1,9 @@
+PyQt6
+rawpy
+pillow-heif
+Pillow
+opencv-python-headless
+moviepy
+numpy
+onnxruntime
+instagrapi
