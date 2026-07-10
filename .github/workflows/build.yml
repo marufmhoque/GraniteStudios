@@ -1,0 +1,57 @@
+name: Build Granite Studios
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+jobs:
+  build-mac:
+    name: Build macOS .app bundle
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build .app with PyInstaller
+        run: |
+          pyinstaller main.py \
+            --name "Granite Studios" \
+            --windowed \
+            --onedir \
+            --noconfirm \
+            --clean \
+            --add-data "src:src" \
+            --hidden-import rawpy \
+            --hidden-import PyQt6.QtCore \
+            --hidden-import PyQt6.QtWidgets \
+            --hidden-import PyQt6.QtGui \
+            --hidden-import moviepy \
+            --hidden-import onnxruntime \
+            --hidden-import pillow_heif \
+            --hidden-import cv2
+
+      - name: Zip the .app bundle
+        run: |
+          cd dist
+          ditto -c -k --sequesterRsrc --keepParent \
+            "Granite Studios.app" "Granite-Studios-macOS.zip"
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Granite-Studios-macOS
+          path: dist/Granite-Studios-macOS.zip
+          if-no-files-found: error

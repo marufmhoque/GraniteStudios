@@ -13,7 +13,7 @@ from pathlib import Path
 
 from PIL import Image
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize
-from PyQt6.QtGui import QPixmap, QImage, QFont
+from PyQt6.QtGui import QPixmap, QImage, QFont, QIcon
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -34,6 +34,7 @@ from PyQt6.QtWidgets import (
 )
 
 from src.engine.hardware import get_hardware_summary
+from src.engine.resources import resource_path
 from src.engine.universal_loader import UniversalLoader
 from src.ai_tools.culling import SmartCull
 from src.ai_tools.color_engine import ColorEngine
@@ -212,6 +213,13 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Granite Studios")
         self.resize(1360, 860)
         self.setStyleSheet(DARK_STYLESHEET)
+
+        # Resolve the app icon via resource_path so it's found both from
+        # source and inside a packaged .exe / .app bundle. Optional — the
+        # app runs fine with no icon file present.
+        icon_path = resource_path("assets/icon.png")
+        if icon_path.exists():
+            self.setWindowIcon(QIcon(str(icon_path)))
 
         # Engine
         self.loader = UniversalLoader()
