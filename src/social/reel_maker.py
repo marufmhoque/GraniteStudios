@@ -13,7 +13,12 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from moviepy import VideoClip
+try:
+    # moviepy 1.x exposes VideoClip through the editor module.
+    from moviepy.editor import VideoClip
+except ImportError:
+    # moviepy 2.x removed moviepy.editor; import from the top-level package.
+    from moviepy import VideoClip
 
 from src.engine.universal_loader import UniversalLoader
 
