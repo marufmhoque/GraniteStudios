@@ -12,14 +12,16 @@ import logging
 from pathlib import Path
 
 from PIL import Image
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize
-from PyQt6.QtGui import QPixmap, QImage, QFont, QIcon
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize, QPropertyAnimation, QEasingCurve
+from PyQt6.QtGui import QPixmap, QImage, QFont, QIcon, QColor
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
     QFileDialog,
     QFrame,
+    QGraphicsDropShadowEffect,
+    QGraphicsOpacityEffect,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -47,47 +49,93 @@ logger = logging.getLogger(__name__)
 
 THUMB_SIZE = 200
 
-DARK_STYLESHEET = """
-QMainWindow, QWidget { background-color: #16171b; color: #e6e6e9; font-size: 13px; }
-QFrame#Sidebar { background-color: #101114; border-right: 1px solid #26272c; }
+# --- "Crimson Granite" theme — Nikon-red accents on deep charcoal --- #
+NIKON_RED = "#E31B23"
+NIKON_RED_DARK = "#8B0000"
+
+CRIMSON_GRANITE_STYLESHEET = """
+* { font-family: "Inter", "Segoe UI", "Roboto", sans-serif; }
+
+QMainWindow, QWidget { background-color: #121212; color: #e8e8ea; font-size: 13px; }
+
+QFrame#Sidebar { background-color: #1a1a1a; border-right: 1px solid #2a2a2a; }
+
 QPushButton#NavButton {
-    background: transparent; border: none; border-radius: 8px;
-    padding: 12px 16px; text-align: left; color: #b6b7bd; font-size: 14px;
+    background: transparent; border: none; border-left: 3px solid transparent;
+    border-radius: 8px; padding: 12px 16px; text-align: left;
+    color: #a8a8ac; font-size: 14px;
 }
-QPushButton#NavButton:hover { background-color: #1e1f24; color: #ffffff; }
-QPushButton#NavButton:checked { background-color: #2a2c33; color: #ffffff; font-weight: 600; }
+QPushButton#NavButton:hover { background-color: #232323; color: #ffffff; }
+QPushButton#NavButton:checked {
+    background-color: rgba(227, 27, 35, 32);
+    border-left: 3px solid #E31B23;
+    color: #ffffff; font-weight: 600;
+}
+
 QPushButton#ActionButton {
-    background-color: #3d6df2; border: none; border-radius: 8px;
-    padding: 10px 20px; color: white; font-weight: 600;
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #E31B23, stop:1 #8B0000);
+    border: none; border-radius: 12px;
+    padding: 10px 22px; color: #ffffff; font-weight: 700;
 }
-QPushButton#ActionButton:hover { background-color: #5580f4; }
-QPushButton#ActionButton:disabled { background-color: #2a2c33; color: #6a6b72; }
+QPushButton#ActionButton:hover {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #FF3A42, stop:1 #B00000);
+}
+QPushButton#ActionButton:pressed {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #C21620, stop:1 #6E0000);
+}
+QPushButton#ActionButton:disabled { background: #2a2a2a; color: #6a6a6e; }
+
 QPushButton#SecondaryButton {
-    background-color: #26272c; border: 1px solid #3a3b42; border-radius: 8px;
-    padding: 9px 18px; color: #e6e6e9;
+    background-color: #1e1e1e; border: 1px solid #333333; border-radius: 12px;
+    padding: 9px 18px; color: #e8e8ea;
 }
-QPushButton#SecondaryButton:hover { background-color: #303138; }
+QPushButton#SecondaryButton:hover { background-color: #262626; border-color: #E31B23; }
+
 QScrollArea { border: none; }
 QLabel#PageTitle { font-size: 22px; font-weight: 700; color: #ffffff; }
-QLabel#PageSubtitle { color: #8f9096; font-size: 13px; }
+QLabel#PageSubtitle { color: #949498; font-size: 13px; }
+
 QLabel#Thumb {
-    background-color: #1c1d22; border: 1px solid #2a2b31; border-radius: 10px;
+    background-color: #1a1a1a; border: 1px solid #333333; border-radius: 12px;
 }
-QLabel#ThumbSelected { border: 2px solid #3d6df2; border-radius: 10px; background-color: #1c1d22; }
+QLabel#Thumb:hover { border: 1px solid #E31B23; }
+QLabel#ThumbSelected {
+    border: 2px solid #E31B23; border-radius: 12px; background-color: #1a1a1a;
+}
+
 QComboBox {
-    background-color: #26272c; border: 1px solid #3a3b42; border-radius: 6px;
-    padding: 6px 12px; color: #e6e6e9;
+    background-color: #1e1e1e; border: 1px solid #333333; border-radius: 8px;
+    padding: 6px 12px; color: #e8e8ea;
 }
-QComboBox QAbstractItemView { background-color: #1c1d22; color: #e6e6e9; selection-background-color: #2a2c33; }
+QComboBox:hover { border-color: #E31B23; }
+QComboBox QAbstractItemView {
+    background-color: #1a1a1a; color: #e8e8ea; selection-background-color: #E31B23;
+    border-radius: 8px;
+}
+
 QProgressBar {
-    background-color: #1c1d22; border: none; border-radius: 6px; height: 8px; text-align: center;
+    background-color: #1a1a1a; border: none; border-radius: 6px; height: 8px; text-align: center;
 }
-QProgressBar::chunk { background-color: #3d6df2; border-radius: 6px; }
-QCheckBox { color: #b6b7bd; spacing: 8px; }
-QScrollBar:vertical { background: #16171b; width: 10px; }
-QScrollBar::handle:vertical { background: #33343b; border-radius: 5px; min-height: 30px; }
+QProgressBar::chunk {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #E31B23, stop:1 #8B0000);
+    border-radius: 6px;
+}
+
+QCheckBox { color: #a8a8ac; spacing: 8px; }
+QCheckBox::indicator {
+    width: 16px; height: 16px; border-radius: 4px; border: 1px solid #333333;
+    background-color: #1a1a1a;
+}
+QCheckBox::indicator:checked { background-color: #E31B23; border-color: #E31B23; }
+
+QScrollBar:vertical { background: #121212; width: 10px; }
+QScrollBar::handle:vertical { background: #333333; border-radius: 5px; min-height: 30px; }
+QScrollBar::handle:vertical:hover { background: #E31B23; }
 QScrollBar::add-line, QScrollBar::sub-line { height: 0; }
 """
+
+# Backward-compatible alias — kept in case other modules import the old name.
+DARK_STYLESHEET = CRIMSON_GRANITE_STYLESHEET
 
 
 def pil_to_pixmap(image: Image.Image) -> QPixmap:
@@ -319,7 +367,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Granite Studios")
         self.resize(1360, 860)
-        self.setStyleSheet(DARK_STYLESHEET)
+        self.setStyleSheet(CRIMSON_GRANITE_STYLESHEET)
 
         # Resolve the app icon via resource_path so it's found both from
         # source and inside a packaged .exe / .app bundle. Optional — the
@@ -344,6 +392,7 @@ class MainWindow(QMainWindow):
         self.labels: dict[str, str] = {}
         self._thumb_worker: ThumbnailWorker | None = None
         self._task_worker: TaskWorker | None = None
+        self._page_fade_anim: QPropertyAnimation | None = None
 
         self._build_ui()
 
@@ -369,6 +418,7 @@ class MainWindow(QMainWindow):
         root_layout.addWidget(self.pages, stretch=1)
 
         self.nav_buttons[0].setChecked(True)
+        self._set_nav_glow(self.nav_buttons[0], True)
 
     def _build_sidebar(self) -> QFrame:
         sidebar = QFrame()
@@ -666,9 +716,40 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ #
 
     def _switch_page(self, index: int) -> None:
+        if index == self.pages.currentIndex():
+            return
         for i, btn in enumerate(self.nav_buttons):
             btn.setChecked(i == index)
+            self._set_nav_glow(btn, i == index)
         self.pages.setCurrentIndex(index)
+        self._fade_in_current_page()
+
+    def _set_nav_glow(self, btn: QPushButton, active: bool) -> None:
+        """Give the active nav item a subtle red glow (Nikon-red accent)."""
+        if not active:
+            btn.setGraphicsEffect(None)
+            return
+        glow = QGraphicsDropShadowEffect(btn)
+        glow.setColor(QColor(NIKON_RED))
+        glow.setBlurRadius(28)
+        glow.setOffset(0, 0)
+        btn.setGraphicsEffect(glow)
+
+    def _fade_in_current_page(self) -> None:
+        """Smooth 200ms fade-in when switching between Library/Cull/etc tabs."""
+        page = self.pages.currentWidget()
+        effect = QGraphicsOpacityEffect(page)
+        page.setGraphicsEffect(effect)
+
+        anim = QPropertyAnimation(effect, b"opacity", self)
+        anim.setDuration(200)
+        anim.setStartValue(0.0)
+        anim.setEndValue(1.0)
+        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        anim.finished.connect(lambda: page.setGraphicsEffect(None))
+        # Keep a reference so the animation isn't garbage-collected mid-flight.
+        self._page_fade_anim = anim
+        anim.start()
 
     def _on_thumb_clicked(self, path: str) -> None:
         cell = self.cells.get(path)
@@ -1050,6 +1131,12 @@ def run() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     app = QApplication(sys.argv)
     app.setApplicationName("Granite Studios")
+
+    app_font = QFont()
+    app_font.setFamilies(["Inter", "Segoe UI", "Roboto", "sans-serif"])
+    app_font.setPointSize(10)
+    app.setFont(app_font)
+
     window = MainWindow()
     window.show()
     return app.exec()
