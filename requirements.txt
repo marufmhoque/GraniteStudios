@@ -7,3 +7,4 @@ moviepy
 numpy
 onnxruntime
 instagrapi
+pyshortcuts

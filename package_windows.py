@@ -7,23 +7,23 @@ Usage
 
 Output
 ------
-    dist/Granite Studios/            <- the app folder (--onedir)
-        Granite Studios.exe          <- double-click to launch
+    dist/GraniteStudios/            <- the app folder (--onedir)
+        GraniteStudios.exe          <- double-click to launch
 
 --onedir is used (instead of --onefile) for much faster startup, and
 --noconsole hides the terminal window so no black command box appears.
-Zip the whole ``dist/Granite Studios`` folder to distribute it.
+Zip the whole ``dist/GraniteStudios`` folder to distribute it.
 """
 
 from __future__ import annotations
 
 import os
-import shutil
 import sys
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-APP_NAME = "Granite Studios"
+APP_NAME = "GraniteStudios"          # PyInstaller --name -> exe filename
+DISPLAY_NAME = "Granite Studios"     # human-facing name for shortcuts/prints
 ENTRY_POINT = "main.py"
 
 # Modules PyInstaller's static analysis can miss (native / lazily imported).
@@ -38,7 +38,39 @@ HIDDEN_IMPORTS = [
     # backends that PyInstaller occasionally fails to follow.
     "pillow_heif",
     "cv2",
+    "pyshortcuts",
 ]
+
+ICO_SIZES = [(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
+
+
+def convert_icons(project_root: Path, source_png: Path) -> tuple[Path | None, Path | None]:
+    """Convert icon.png into icon.ico (Windows) and icon.icns (macOS) via Pillow.
+
+    Each OS reads its own native icon format for the exe/app-bundle/taskbar/
+    Dock to render correctly — Explorer wants .ico, Finder wants .icns.
+    icon.png stays the single source of truth; both files are regenerated
+    on every build so they can never drift out of sync with it.
+
+    Returns (ico_path, icns_path), with either entry None if source_png is
+    missing.
+    """
+    if not source_png.exists():
+        print(f"Warning: {source_png} not found — skipping icon conversion.")
+        return None, None
+
+    from PIL import Image
+
+    image = Image.open(source_png).convert("RGBA")
+
+    ico_path = project_root / "icon.ico"
+    image.save(ico_path, format="ICO", sizes=ICO_SIZES)
+
+    icns_path = project_root / "icon.icns"
+    image.save(icns_path, format="ICNS")
+
+    print(f"Generated {ico_path.name} (Windows) and {icns_path.name} (macOS) from {source_png.name}.")
+    return ico_path, icns_path
 
 
 def build() -> None:
@@ -65,16 +97,17 @@ def build() -> None:
         "--add-data", f"{PROJECT_ROOT / 'src'}{sep}src",
     ]
 
-    # App icon: --icon sets the .exe/window icon (PyInstaller converts a
-    # .png to .ico automatically via Pillow). Also add it as bundled data
-    # at the bundle root so resource_path("icon.png") finds it at runtime
-    # for the splash screen and window icon.
+    # App icon: convert icon.png -> icon.ico/.icns, use the .ico for the
+    # .exe itself, and bundle both the source PNG and the ICO as runtime
+    # data so resource_path() can find them (splash screen, window icon,
+    # and the shortcut icon created by src/engine/create_shortcut.py).
     icon_png = PROJECT_ROOT / "icon.png"
+    ico_path, _icns_path = convert_icons(PROJECT_ROOT, icon_png)
+    if ico_path is not None:
+        args += ["--icon", str(ico_path)]
+        args += ["--add-data", f"{ico_path}{sep}."]
     if icon_png.exists():
-        args += ["--icon", str(icon_png)]
         args += ["--add-data", f"{icon_png}{sep}."]
-    else:
-        print(f"Warning: {icon_png} not found — building without a custom icon.")
 
     # Include the assets folder (extra art, fonts, etc.) only if it exists.
     assets_dir = PROJECT_ROOT / "assets"
@@ -97,6 +130,7 @@ def build() -> None:
         print(f"Build complete: {dist_dir}")
         print(f"Launch: {dist_dir / (APP_NAME + '.exe')}")
         print(f"Distribute: zip the folder '{dist_dir}'.")
+        print(f"On first launch, {DISPLAY_NAME} adds its own Desktop and Start Menu shortcut.")
     else:
         print("Build finished, but the expected output folder was not found.")
         print("Check the PyInstaller output above for errors.")

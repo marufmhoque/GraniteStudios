@@ -25,6 +25,16 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
+      - name: Generate icon.icns from icon.png
+        run: |
+          python - <<'PY'
+          from PIL import Image
+
+          im = Image.open("icon.png").convert("RGBA")
+          im.save("icon.icns", format="ICNS")
+          print("icon.icns generated")
+          PY
+
       - name: Build .app with PyInstaller
         run: |
           pyinstaller main.py \
@@ -33,7 +43,10 @@ jobs:
             --onedir \
             --noconfirm \
             --clean \
+            --icon "icon.icns" \
             --add-data "src:src" \
+            --add-data "icon.png:." \
+            --add-data "icon.icns:." \
             --hidden-import rawpy \
             --hidden-import PyQt6.QtCore \
             --hidden-import PyQt6.QtWidgets \
@@ -41,17 +54,32 @@ jobs:
             --hidden-import moviepy \
             --hidden-import onnxruntime \
             --hidden-import pillow_heif \
-            --hidden-import cv2
+            --hidden-import cv2 \
+            --hidden-import pyshortcuts
 
-      - name: Zip the .app bundle
+      - name: Install create-dmg
+        run: brew install create-dmg
+
+      - name: Build .dmg installer
         run: |
-          cd dist
-          ditto -c -k --sequesterRsrc --keepParent \
-            "Granite Studios.app" "Granite-Studios-macOS.zip"
+          mkdir -p dist_dmg
+          create-dmg \
+            --volname "Granite Studios" \
+            --window-pos 200 120 \
+            --window-size 660 400 \
+            --icon-size 100 \
+            --icon "Granite Studios.app" 180 170 \
+            --hide-extension "Granite Studios.app" \
+            --app-drop-link 480 170 \
+            "dist_dmg/Granite-Studios-macOS.dmg" \
+            "dist/Granite Studios.app" || true
+
+      - name: Verify the .dmg was created
+        run: test -f "dist_dmg/Granite-Studios-macOS.dmg"
 
       - name: Upload macOS artifact
         uses: actions/upload-artifact@v4
         with:
           name: Granite-Studios-macOS
-          path: dist/Granite-Studios-macOS.zip
+          path: dist_dmg/Granite-Studios-macOS.dmg
           if-no-files-found: error

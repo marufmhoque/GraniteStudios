@@ -81,9 +81,15 @@ def main() -> int:
 
     # Heavy imports (engine + AI modules) happen here, while the splash is
     # already visible, so the delay is hidden rather than dead air.
+    from src.engine.create_shortcut import create_desktop_shortcut
     from src.ui.main_window import MainWindow
 
     window = MainWindow()
+
+    # First-run convenience: drop a Desktop/Start Menu shortcut so future
+    # launches don't require digging through a dist/ folder for the .exe.
+    # No-ops instantly on every launch after the first (marker-file check).
+    create_desktop_shortcut()
 
     # Hold the splash for its full duration without blocking the event
     # loop, then hand off to the main window.

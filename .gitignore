@@ -221,6 +221,11 @@ __marimo__/
 *_graded.jpg
 *.mp4
 
+# Generated icon formats — regenerated from icon.png by package_windows.py
+# / build.yml on every build, never hand-edited.
+icon.ico
+icon.icns
+
 # OS / editor
 .DS_Store
 Thumbs.db
