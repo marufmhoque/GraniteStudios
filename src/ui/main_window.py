@@ -23,6 +23,7 @@ from PyQt6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMessageBox,
     QProgressBar,
@@ -35,7 +36,7 @@ from PyQt6.QtWidgets import (
 
 from src.engine.hardware import get_hardware_summary
 from src.engine.resources import resource_path
-from src.engine.universal_loader import UniversalLoader
+from src.engine.universal_loader import UniversalLoader, ImageMetadata
 from src.ai_tools.culling import SmartCull
 from src.ai_tools.color_engine import ColorEngine
 from src.social.reel_maker import ScrlReelMaker
@@ -107,6 +108,7 @@ class ThumbnailWorker(QThread):
     """Decode previews off the UI thread and stream them back."""
 
     thumb_ready = pyqtSignal(str, QPixmap)
+    meta_ready = pyqtSignal(str, object)
     progress = pyqtSignal(int, int)
     finished_all = pyqtSignal()
 
@@ -129,6 +131,9 @@ class ThumbnailWorker(QThread):
                 thumb = preview.copy()
                 thumb.thumbnail((THUMB_SIZE, THUMB_SIZE), Image.Resampling.LANCZOS)
                 self.thumb_ready.emit(str(path), pil_to_pixmap(thumb))
+            if not self._cancelled:
+                # EXIF gear/exposure info for the Tech Info overlay.
+                self.meta_ready.emit(str(path), self.loader.read_metadata(path))
             self.progress.emit(i, total)
         self.finished_all.emit()
 
@@ -165,13 +170,48 @@ class ThumbnailCell(QLabel):
         super().__init__(parent)
         self.path = path
         self.selected = False
+        self.metadata: ImageMetadata | None = None
+        self.label_text = ""
+        self._badge = ""
+        self._tech_visible = False
         self.setObjectName("Thumb")
         self.setFixedSize(QSize(THUMB_SIZE + 12, THUMB_SIZE + 34))
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setText(Path(path).name)
         self.setWordWrap(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._badge = ""
+
+        w = THUMB_SIZE + 12
+        h = THUMB_SIZE + 34
+
+        # Top-left: star / duplicate badge from the AI cull pass.
+        self.badge_label = QLabel(self)
+        self.badge_label.setGeometry(6, 6, 130, 22)
+        self.badge_label.hide()
+
+        # Top-right: assigned category label.
+        self.label_tag = QLabel(self)
+        self.label_tag.setGeometry(w - 96, 6, 90, 22)
+        self.label_tag.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.label_tag.setStyleSheet(
+            "background: rgba(61,109,242,0.92); color: white; border-radius: 6px;"
+            " padding: 2px 6px; font-size: 11px; font-weight: 600;"
+        )
+        self.label_tag.hide()
+
+        # Bottom strip: EXIF tech info (camera | lens + exposure).
+        self.tech_label = QLabel(self)
+        self.tech_label.setGeometry(6, h - 44, w - 12, 38)
+        self.tech_label.setWordWrap(True)
+        self.tech_label.setStyleSheet(
+            "background: rgba(10,11,14,0.82); color: #d8d9de; border-radius: 6px;"
+            " padding: 3px 6px; font-size: 10px;"
+        )
+        self.tech_label.hide()
+
+    def _raise_overlays(self) -> None:
+        for overlay in (self.badge_label, self.label_tag, self.tech_label):
+            overlay.raise_()
 
     def set_pixmap(self, pixmap: QPixmap) -> None:
         self.setPixmap(
@@ -182,10 +222,77 @@ class ThumbnailCell(QLabel):
                 Qt.TransformationMode.SmoothTransformation,
             )
         )
+        self._raise_overlays()
+
+    def _rebuild_tooltip(self) -> None:
+        parts = [Path(self.path).name]
+        if self.metadata is not None:
+            if self.metadata.gear_label:
+                parts.append(self.metadata.gear_label)
+            if self.metadata.settings_label:
+                parts.append(self.metadata.settings_label)
+        if self.label_text:
+            parts.append(f"Label: {self.label_text}")
+        if self._badge:
+            parts.append(self._badge)
+        self.setToolTip("\n".join(parts))
 
     def set_badge(self, text: str) -> None:
         self._badge = text
-        self.setToolTip(f"{Path(self.path).name}\n{text}" if text else Path(self.path).name)
+        self._rebuild_tooltip()
+
+    def set_metadata(self, metadata: ImageMetadata | None) -> None:
+        self.metadata = metadata
+        self._rebuild_tooltip()
+        self._refresh_tech()
+
+    def set_tech_visible(self, visible: bool) -> None:
+        self._tech_visible = visible
+        self._refresh_tech()
+
+    def _refresh_tech(self) -> None:
+        if self._tech_visible and self.metadata is not None:
+            combined = "\n".join(
+                t for t in (self.metadata.gear_label, self.metadata.settings_label) if t
+            )
+            if combined:
+                self.tech_label.setText(combined)
+                self.tech_label.show()
+                self.tech_label.raise_()
+                return
+        self.tech_label.hide()
+
+    def set_label(self, label: str) -> None:
+        self.label_text = label or ""
+        if self.label_text:
+            self.label_tag.setText(self.label_text)
+            self.label_tag.show()
+            self.label_tag.raise_()
+        else:
+            self.label_tag.hide()
+        self._rebuild_tooltip()
+
+    def set_pick_state(self, starred: bool, duplicate: bool, detail: str = "") -> None:
+        if starred:
+            self.badge_label.setText("★ STARRED")
+            self.badge_label.setStyleSheet(
+                "background: rgba(20,22,28,0.9); color: #ffd24a; border-radius: 6px;"
+                " padding: 2px 6px; font-size: 11px; font-weight: 700;"
+            )
+            self.badge_label.show()
+            self.badge_label.raise_()
+        elif duplicate:
+            self.badge_label.setText("DUPLICATE")
+            self.badge_label.setStyleSheet(
+                "background: rgba(20,22,28,0.9); color: #9a9ba1; border-radius: 6px;"
+                " padding: 2px 6px; font-size: 11px; font-weight: 600;"
+            )
+            self.badge_label.show()
+            self.badge_label.raise_()
+        else:
+            self.badge_label.hide()
+        if detail:
+            self.set_badge(detail)
 
     def mousePressEvent(self, event) -> None:  # noqa: N802 (Qt naming)
         if event.button() == Qt.MouseButton.LeftButton:
@@ -233,6 +340,8 @@ class MainWindow(QMainWindow):
         self.image_paths: list[Path] = []
         self.selected: set[str] = set()
         self.cells: dict[str, ThumbnailCell] = {}
+        self.metadata: dict[str, ImageMetadata] = {}
+        self.labels: dict[str, str] = {}
         self._thumb_worker: ThumbnailWorker | None = None
         self._task_worker: TaskWorker | None = None
 
@@ -324,6 +433,35 @@ class MainWindow(QMainWindow):
         self.load_button.clicked.connect(self._on_load_folder)
         top.addWidget(self.load_button)
         layout.addLayout(top)
+
+        # Labeling + tech-info toolbar.
+        tools = QHBoxLayout()
+        tools.setSpacing(10)
+        tools.addWidget(QLabel("Label:"))
+        self.label_combo = QComboBox()
+        self.label_combo.setEditable(True)
+        self.label_combo.addItems(
+            ["Graduation", "Nature", "Portraits", "Travel", "Events", "Wildlife"]
+        )
+        self.label_combo.setMinimumWidth(180)
+        tools.addWidget(self.label_combo)
+
+        apply_label_btn = QPushButton("Apply to Selected")
+        apply_label_btn.setObjectName("SecondaryButton")
+        apply_label_btn.clicked.connect(self._on_apply_label)
+        tools.addWidget(apply_label_btn)
+
+        clear_label_btn = QPushButton("Clear Label")
+        clear_label_btn.setObjectName("SecondaryButton")
+        clear_label_btn.clicked.connect(self._on_clear_label)
+        tools.addWidget(clear_label_btn)
+
+        tools.addStretch()
+
+        self.tech_info_check = QCheckBox("Show Tech Info")
+        self.tech_info_check.toggled.connect(self._on_toggle_tech)
+        tools.addWidget(self.tech_info_check)
+        layout.addLayout(tools)
 
         self.progress = QProgressBar()
         self.progress.setVisible(False)
@@ -501,9 +639,19 @@ class MainWindow(QMainWindow):
         self.web_selected_only = QCheckBox("Export selected images only (otherwise: whole library)")
         layout.addWidget(self.web_selected_only)
 
+        self.web_group_by_label = QCheckBox("Organize into category tabs by assigned label")
+        self.web_group_by_label.setChecked(True)
+        layout.addWidget(self.web_group_by_label)
+
+        self.web_auto_fix = QCheckBox(
+            "Auto-Edit on export (white balance + histogram equalization)"
+        )
+        layout.addWidget(self.web_auto_fix)
+
         self.web_status = QLabel(
             "Images are resized to max 2000px and published with an index.html "
-            "masonry grid (Tailwind CSS via CDN)."
+            "masonry grid (Tailwind CSS via CDN). Camera + lens info appears under "
+            "each photo."
         )
         self.web_status.setObjectName("PageSubtitle")
         self.web_status.setWordWrap(True)
@@ -551,6 +699,8 @@ class MainWindow(QMainWindow):
         self.current_folder = Path(folder)
         self.image_paths = self.loader.scan_folder(self.current_folder)
         self.selected.clear()
+        self.metadata.clear()
+        self.labels.clear()
 
         # Clear the grid.
         if self._thumb_worker is not None:
@@ -581,6 +731,7 @@ class MainWindow(QMainWindow):
 
         self._thumb_worker = ThumbnailWorker(self.loader, list(self.image_paths), parent=self)
         self._thumb_worker.thumb_ready.connect(self._on_thumb_ready)
+        self._thumb_worker.meta_ready.connect(self._on_meta_ready)
         self._thumb_worker.progress.connect(self._on_thumb_progress)
         self._thumb_worker.finished_all.connect(self._on_thumbs_done)
         self._thumb_worker.start()
@@ -590,6 +741,13 @@ class MainWindow(QMainWindow):
         if cell is not None:
             cell.set_pixmap(pixmap)
 
+    def _on_meta_ready(self, path: str, metadata: object) -> None:
+        self.metadata[path] = metadata  # type: ignore[assignment]
+        cell = self.cells.get(path)
+        if cell is not None:
+            cell.set_metadata(metadata)  # type: ignore[arg-type]
+            cell.set_tech_visible(self.tech_info_check.isChecked())
+
     def _on_thumb_progress(self, done: int, total: int) -> None:
         self.progress.setValue(done)
 
@@ -598,6 +756,45 @@ class MainWindow(QMainWindow):
         self.status_label.setText(
             f"{len(self.image_paths)} images · {len(self.selected)} selected"
         )
+
+    # ------------------------------------------------------------------ #
+    # Labeling & tech info
+    # ------------------------------------------------------------------ #
+
+    def _on_apply_label(self) -> None:
+        targets = self._selected_paths()
+        if not targets:
+            QMessageBox.information(
+                self, "No selection", "Select one or more images in Library first."
+            )
+            return
+        label = self.label_combo.currentText().strip()
+        if not label:
+            QMessageBox.information(self, "No label", "Type or choose a label first.")
+            return
+        for path in targets:
+            key = str(path)
+            self.labels[key] = label
+            cell = self.cells.get(key)
+            if cell is not None:
+                cell.set_label(label)
+        self.status_label.setText(f"Labeled {len(targets)} image(s) as “{label}”.")
+
+    def _on_clear_label(self) -> None:
+        targets = self._selected_paths()
+        if not targets:
+            return
+        for path in targets:
+            key = str(path)
+            self.labels.pop(key, None)
+            cell = self.cells.get(key)
+            if cell is not None:
+                cell.set_label("")
+        self.status_label.setText(f"Cleared labels on {len(targets)} image(s).")
+
+    def _on_toggle_tech(self, checked: bool) -> None:
+        for cell in self.cells.values():
+            cell.set_tech_visible(checked)
 
     # ------------------------------------------------------------------ #
     # Task plumbing
@@ -638,31 +835,46 @@ class MainWindow(QMainWindow):
             return
 
         paths = list(self.image_paths)
-        self.cull_results.setText("Analyzing sharpness and grouping bursts…")
+        self.cull_results.setText(
+            "Analyzing sharpness, hashing frames and grouping similar shots…"
+        )
 
         def work():
-            return self.culler.group_bursts(paths, time_threshold=2.0)
+            # Smart grouping: combine capture time + perceptual hash, then
+            # star the top 2 sharpest of each group and flag the rest.
+            return self.culler.group_similar(paths, top_count=2)
 
         def done(groups):
-            lines = [f"Found {len(groups)} groups across {len(paths)} images.\n"]
+            starred = sum(1 for g in groups for f in g if f.is_starred)
+            duplicates = sum(1 for g in groups for f in g if f.is_duplicate)
+            lines = [
+                f"Found {len(groups)} similar-image group(s) across {len(paths)} images.",
+                f"★ {starred} starred · {duplicates} flagged as duplicates.\n",
+            ]
             for i, group in enumerate(groups, start=1):
-                lines.append(f"Burst {i} — {len(group.frames)} frame(s):")
-                for frame in group.frames:
-                    marker = "★ PICK" if frame.is_burst_pick else "      "
+                lines.append(f"Group {i} — {len(group)} frame(s):")
+                for frame in group:
+                    if frame.is_starred:
+                        marker = "★ STAR"
+                    elif frame.is_duplicate:
+                        marker = "  dup "
+                    else:
+                        marker = "      "
                     lines.append(
                         f"  {marker}  {frame.path.name}   sharpness {frame.sharpness:,.0f}"
                     )
                 lines.append("")
             self.cull_results.setText("\n".join(lines))
 
-            # Badge the picks in the Library grid.
+            # Reflect star / duplicate state onto the Library grid.
             for group in groups:
-                for frame in group.frames:
+                for frame in group:
                     cell = self.cells.get(str(frame.path))
                     if cell is not None:
-                        cell.set_badge(
-                            ("★ Burst pick · " if frame.is_burst_pick else "")
-                            + f"sharpness {frame.sharpness:,.0f}"
+                        cell.set_pick_state(
+                            starred=frame.is_starred,
+                            duplicate=frame.is_duplicate,
+                            detail=f"sharpness {frame.sharpness:,.0f}",
                         )
 
         self._run_task(work, done, self.cull_button)
@@ -786,13 +998,35 @@ class MainWindow(QMainWindow):
         if not out_dir:
             return
 
-        self.web_status.setText(f"Publishing {len(targets)} images…")
+        group_by_label = self.web_group_by_label.isChecked()
+        auto_fix = self.web_auto_fix.isChecked()
+
+        # Build the {category: [items]} structure the publisher expects,
+        # attaching each image's gear caption from its EXIF metadata.
+        gallery: dict[str, list[dict]] = {}
+        for path in targets:
+            key = str(path)
+            category = self.labels.get(key, "Unlabeled") if group_by_label else "All Photos"
+            meta = self.metadata.get(key)
+            gallery.setdefault(category, []).append(
+                {
+                    "path": path,
+                    "gear": meta.gear_label if isinstance(meta, ImageMetadata) else "",
+                }
+            )
+
+        self.web_status.setText(
+            f"Publishing {len(targets)} images into {len(gallery)} categor"
+            f"{'y' if len(gallery) == 1 else 'ies'}…"
+        )
 
         def work():
-            return generate_static_gallery(targets, out_dir)
+            return generate_static_gallery(gallery, out_dir, auto_fix=auto_fix)
 
         def done(index_path):
-            self.web_status.setText(f"Gallery published: {index_path}\nOpen index.html in a browser.")
+            self.web_status.setText(
+                f"Gallery published: {index_path}\nOpen index.html in a browser."
+            )
 
         self._run_task(work, done, self.web_button)
 

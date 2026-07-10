@@ -16,6 +16,7 @@ import io
 import logging
 import threading
 from collections import OrderedDict
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -33,6 +34,79 @@ RAW_EXTENSIONS = {".nef", ".cr2", ".cr3", ".arw", ".dng", ".raf", ".orf", ".rw2"
 HEIF_EXTENSIONS = {".heic", ".heif"}
 STANDARD_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp", ".bmp"}
 SUPPORTED_EXTENSIONS = RAW_EXTENSIONS | HEIF_EXTENSIONS | STANDARD_EXTENSIONS
+
+# EXIF numeric tag ids. Using raw ids keeps us independent of the evolving
+# names in Pillow's ExifTags enums across versions.
+_EXIF_MAKE = 0x010F
+_EXIF_MODEL = 0x0110
+_EXIF_SUBIFD = 0x8769  # pointer to the Exif sub-IFD
+_EXIF_EXPOSURE_TIME = 0x829A
+_EXIF_FNUMBER = 0x829D
+_EXIF_ISO = 0x8827
+_EXIF_LENS_MODEL = 0xA434
+
+
+@dataclass
+class ImageMetadata:
+    """Camera/lens/exposure info extracted from an image's EXIF."""
+
+    camera_make: str | None = None
+    camera_model: str | None = None
+    lens_model: str | None = None
+    iso: int | None = None
+    aperture: float | None = None
+    shutter_speed: str | None = None
+
+    @property
+    def camera_label(self) -> str:
+        """Clean camera name, e.g. "Nikon D3400" (make prefix de-duplicated)."""
+        make = (self.camera_make or "").strip()
+        model = (self.camera_model or "").strip()
+        make_short = make.split()[0].title() if make else ""
+        if model:
+            trimmed = model
+            if make_short and trimmed.upper().startswith(make_short.upper()):
+                trimmed = trimmed[len(make_short):].strip()
+            return f"{make_short} {trimmed}".strip() if make_short else trimmed
+        return make_short
+
+    @property
+    def lens_label(self) -> str:
+        """Lens description, e.g. "18-55mm" (empty when unknown)."""
+        return (self.lens_model or "").strip()
+
+    @property
+    def aperture_label(self) -> str:
+        if self.aperture is None:
+            return ""
+        value = ("%.1f" % self.aperture).rstrip("0").rstrip(".")
+        return f"f/{value}"
+
+    @property
+    def settings_label(self) -> str:
+        """Compact exposure triangle, e.g. "ISO 200 · f/5.6 · 1/250s"."""
+        parts: list[str] = []
+        if self.iso is not None:
+            parts.append(f"ISO {self.iso}")
+        if self.aperture is not None:
+            parts.append(self.aperture_label)
+        if self.shutter_speed:
+            parts.append(self.shutter_speed)
+        return " · ".join(parts)
+
+    @property
+    def gear_label(self) -> str:
+        """Camera + lens on one line, e.g. "Nikon D3400 | 18-55mm"."""
+        pieces = [p for p in (self.camera_label, self.lens_label) if p]
+        return " | ".join(pieces)
+
+    def as_dict(self) -> dict:
+        return {
+            "camera": self.camera_label,
+            "lens": self.lens_label,
+            "settings": self.settings_label,
+            "gear": self.gear_label,
+        }
 
 
 class _LRUCache:
@@ -136,6 +210,101 @@ class UniversalLoader:
 
     def clear_cache(self) -> None:
         self._cache.clear()
+
+    # ------------------------------------------------------------------ #
+    # Metadata / EXIF
+    # ------------------------------------------------------------------ #
+
+    def read_metadata(self, path: str | Path) -> ImageMetadata:
+        """Extract camera, lens, ISO, aperture and shutter speed from EXIF.
+
+        Standard and HEIC images are read directly. RAW files carry EXIF in
+        their embedded JPEG thumbnail, so we read the metadata from there.
+        Always returns an ``ImageMetadata`` — empty if nothing is available.
+        """
+        path = Path(path)
+        try:
+            if path.suffix.lower() in RAW_EXTENSIONS:
+                return self._metadata_from_raw(path)
+            with Image.open(path) as img:
+                return self._extract_exif(img)
+        except Exception:
+            logger.debug("Metadata read failed for %s", path, exc_info=True)
+            return ImageMetadata()
+
+    def _metadata_from_raw(self, path: Path) -> ImageMetadata:
+        with rawpy.imread(str(path)) as raw:
+            try:
+                thumb = raw.extract_thumb()
+            except (rawpy.LibRawNoThumbnailError, rawpy.LibRawUnsupportedThumbnailError):
+                thumb = None
+            data = thumb.data if (thumb and thumb.format == rawpy.ThumbFormat.JPEG) else None
+        if data is None:
+            return ImageMetadata()
+        with Image.open(io.BytesIO(data)) as img:
+            return self._extract_exif(img)
+
+    def _extract_exif(self, img: Image.Image) -> ImageMetadata:
+        exif = img.getexif()
+        if not exif:
+            return ImageMetadata()
+
+        make = self._clean_str(exif.get(_EXIF_MAKE))
+        model = self._clean_str(exif.get(_EXIF_MODEL))
+
+        try:
+            sub = exif.get_ifd(_EXIF_SUBIFD)
+        except Exception:
+            sub = {}
+
+        lens = self._clean_str(sub.get(_EXIF_LENS_MODEL))
+        iso = self._clean_iso(sub.get(_EXIF_ISO))
+        aperture = self._clean_float(sub.get(_EXIF_FNUMBER))
+        shutter = self._format_shutter(sub.get(_EXIF_EXPOSURE_TIME))
+
+        return ImageMetadata(
+            camera_make=make,
+            camera_model=model,
+            lens_model=lens,
+            iso=iso,
+            aperture=aperture,
+            shutter_speed=shutter,
+        )
+
+    @staticmethod
+    def _clean_str(value) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip().rstrip("\x00").strip()
+        return text or None
+
+    @staticmethod
+    def _clean_iso(value) -> int | None:
+        if isinstance(value, (tuple, list)):
+            value = value[0] if value else None
+        try:
+            return int(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _clean_float(value) -> float | None:
+        try:
+            return float(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _format_shutter(value) -> str | None:
+        try:
+            seconds = float(value)
+        except (TypeError, ValueError):
+            return None
+        if seconds <= 0:
+            return None
+        if seconds >= 1:
+            return f"{seconds:g}s"
+        return f"1/{round(1 / seconds)}s"
 
     # ------------------------------------------------------------------ #
     # Internals

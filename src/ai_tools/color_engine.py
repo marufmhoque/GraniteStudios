@@ -206,3 +206,45 @@ class ColorEngine:
             pixels = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2RGB)
 
         return pixels
+
+    # ------------------------------------------------------------------ #
+    # Automated one-click editing
+    # ------------------------------------------------------------------ #
+
+    def smart_auto_fix(self, image_array: np.ndarray) -> np.ndarray:
+        """One-click auto-edit: white-point balance + histogram equalization.
+
+        Two classic corrections, in order:
+
+        1. **White-point balance** — a percentile-based white patch. Each RGB
+           channel is scaled so its 99th-percentile value maps to white,
+           neutralizing color casts (e.g. an over-warm indoor shot). The
+           high percentile (rather than the max) ignores stray blown pixels.
+
+        2. **Histogram equalization** — CLAHE (contrast-limited adaptive
+           histogram equalization) on the L channel in LAB space, which lifts
+           local contrast without the harsh, blown-out look of a global
+           equalize and without shifting hue or saturation.
+
+        Ideal as an automatic pass while preparing photos for the web.
+
+        Args:
+            image_array: RGB uint8 array (H, W, 3).
+        """
+        result = image_array.astype(np.float32)
+
+        # --- 1. White-point balance (percentile white patch) ----------- #
+        for channel in range(3):
+            high = np.percentile(result[..., channel], 99)
+            if high > 0:
+                result[..., channel] *= 255.0 / high
+        result = np.clip(result, 0, 255).astype(np.uint8)
+
+        # --- 2. Adaptive histogram equalization on luminance ----------- #
+        lab = cv2.cvtColor(result, cv2.COLOR_RGB2LAB)
+        lightness, a, b = cv2.split(lab)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        lightness = clahe.apply(lightness)
+        balanced = cv2.merge((lightness, a, b))
+
+        return cv2.cvtColor(balanced, cv2.COLOR_LAB2RGB)

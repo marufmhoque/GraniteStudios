@@ -37,6 +37,9 @@ class CullResult:
     sharpness: float
     timestamp: datetime | None = None
     is_burst_pick: bool = False
+    phash: int | None = None
+    is_starred: bool = False
+    is_duplicate: bool = False
 
 
 @dataclass
@@ -83,6 +86,36 @@ class SmartCull:
 
         gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
         return float(cv2.Laplacian(gray, cv2.CV_64F).var())
+
+    # ------------------------------------------------------------------ #
+    # Perceptual hashing (near-duplicate detection)
+    # ------------------------------------------------------------------ #
+
+    def perceptual_hash(self, image_path: str | Path) -> int:
+        """Compute a 64-bit dHash for visual-similarity comparison.
+
+        dHash downsizes to 9x8 grayscale and encodes whether each pixel is
+        brighter than its right-hand neighbour. Near-identical frames (a
+        burst of the same scene) produce hashes a small Hamming distance
+        apart, even across minor exposure/focus changes. Returns 0 on failure.
+        """
+        preview = self.loader.load_preview(image_path)
+        if preview is None:
+            return 0
+
+        small = preview.convert("L").resize((9, 8), Image.Resampling.LANCZOS)
+        pixels = np.asarray(small, dtype=np.int16)
+        diff = pixels[:, 1:] > pixels[:, :-1]  # 8x8 boolean grid
+
+        value = 0
+        for bit in diff.flatten():
+            value = (value << 1) | int(bit)
+        return value
+
+    @staticmethod
+    def hamming_distance(a: int, b: int) -> int:
+        """Number of differing bits between two perceptual hashes."""
+        return bin(a ^ b).count("1")
 
     # ------------------------------------------------------------------ #
     # Timestamps
@@ -173,3 +206,108 @@ class SmartCull:
         """Convenience: scan a folder and return its burst groups."""
         paths = self.loader.scan_folder(folder)
         return self.group_bursts(list(paths), time_threshold=time_threshold)
+
+    # ------------------------------------------------------------------ #
+    # Smart grouping & top picks
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _as_results(image_group) -> list[CullResult]:
+        """Normalize a BurstGroup / list of CullResult / list of paths."""
+        if isinstance(image_group, BurstGroup):
+            return image_group.frames
+        frames: list[CullResult] = []
+        for item in image_group:
+            if isinstance(item, CullResult):
+                frames.append(item)
+            else:  # a path-like
+                frames.append(CullResult(path=Path(item), sharpness=0.0))
+        return frames
+
+    def get_top_picks(self, image_group, count: int = 2) -> list[CullResult]:
+        """Star the sharpest frames in a similar-image group, flag the rest.
+
+        Given a group of visually similar images (produced by
+        :meth:`group_similar`, which combines capture timestamps with a
+        perceptual hash), this sorts the frames by sharpness, stars the top
+        ``count``, and marks every remaining frame as a duplicate.
+
+        Args:
+            image_group: A ``BurstGroup``, a list of ``CullResult``, or a
+                list of image paths.
+            count: How many frames to star (default 2).
+
+        Returns:
+            The frames sorted sharpest-first, with ``is_starred`` and
+            ``is_duplicate`` set on each.
+        """
+        frames = self._as_results(image_group)
+
+        # Make sure every frame has a sharpness score and perceptual hash.
+        for frame in frames:
+            if frame.sharpness == 0.0:
+                frame.sharpness = self.calculate_sharpness(frame.path)
+            if frame.phash is None:
+                frame.phash = self.perceptual_hash(frame.path)
+
+        ordered = sorted(frames, key=lambda f: f.sharpness, reverse=True)
+
+        for rank, frame in enumerate(ordered):
+            frame.is_starred = rank < count
+            frame.is_duplicate = rank >= count
+
+        return ordered
+
+    def group_similar(
+        self,
+        image_paths: list[str | Path],
+        time_threshold: float = 3.0,
+        hash_threshold: int = 12,
+        top_count: int = 2,
+    ) -> list[list[CullResult]]:
+        """Group visually similar shots and auto-star the best of each.
+
+        A frame joins an existing group when it is close in *both* capture
+        time (within ``time_threshold`` seconds of the group's latest frame)
+        and appearance (perceptual-hash Hamming distance within
+        ``hash_threshold``). Each resulting group then has its top
+        ``top_count`` frames starred and the rest marked as duplicates.
+
+        Returns a list of groups, each a sharpness-sorted list of
+        ``CullResult``.
+        """
+        results: list[CullResult] = []
+        for p in image_paths:
+            path = Path(p)
+            results.append(
+                CullResult(
+                    path=path,
+                    sharpness=self.calculate_sharpness(path),
+                    timestamp=self.get_timestamp(path),
+                    phash=self.perceptual_hash(path),
+                )
+            )
+
+        # Order by time so bursts are contiguous; undated frames trail behind.
+        dated = sorted((r for r in results if r.timestamp), key=lambda r: r.timestamp)
+        undated = [r for r in results if r.timestamp is None]
+
+        groups: list[list[CullResult]] = []
+        for frame in dated:
+            placed = False
+            if groups:
+                last = groups[-1][-1]
+                close_in_time = (
+                    last.timestamp is not None
+                    and (frame.timestamp - last.timestamp).total_seconds() <= time_threshold
+                )
+                close_in_look = self.hamming_distance(frame.phash or 0, last.phash or 0) <= hash_threshold
+                if close_in_time and close_in_look:
+                    groups[-1].append(frame)
+                    placed = True
+            if not placed:
+                groups.append([frame])
+
+        groups.extend([frame] for frame in undated)
+
+        return [self.get_top_picks(group, count=top_count) for group in groups]
