@@ -212,6 +212,48 @@ class UniversalLoader:
         self._cache.clear()
 
     # ------------------------------------------------------------------ #
+    # Edit subfolder — keeps originals (especially RAW) untouched
+    # ------------------------------------------------------------------ #
+
+    def get_edit_folder(self, folder: str | Path, create: bool = True) -> Path:
+        """Return the ``<FolderName>-edit`` subfolder for a loaded folder.
+
+        Every edited JPEG, resized export, and "keeper" (see
+        :meth:`export_keeper`) is written here instead of next to the
+        originals — RAW files and everything else in the source folder are
+        never modified or moved.
+        """
+        folder = Path(folder)
+        edit_folder = folder / f"{folder.name}-edit"
+        if create:
+            edit_folder.mkdir(parents=True, exist_ok=True)
+        return edit_folder
+
+    def export_keeper(
+        self,
+        source: str | Path,
+        folder: str | Path,
+        quality: int = 95,
+    ) -> Path:
+        """Flatten ``source`` into a full-resolution JPEG in the edit folder.
+
+        Idempotent — if a keeper JPEG for this source already exists, it is
+        reused rather than re-decoded (cheap to call repeatedly, e.g. once
+        per "Publish to Web" toggle). This is what makes a RAW file usable
+        by every downstream export (color grading, IG formatting, web
+        publishing) without ever writing next to the original.
+        """
+        source = Path(source)
+        edit_folder = self.get_edit_folder(folder)
+        dest = edit_folder / f"{source.stem}.jpg"
+        if not dest.exists():
+            image = self.load_full(source)
+            if image is None:
+                raise IOError(f"Could not load image: {source}")
+            image.save(dest, "JPEG", quality=quality)
+        return dest
+
+    # ------------------------------------------------------------------ #
     # Metadata / EXIF
     # ------------------------------------------------------------------ #
 

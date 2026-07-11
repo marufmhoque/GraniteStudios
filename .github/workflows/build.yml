@@ -55,7 +55,8 @@ jobs:
             --hidden-import onnxruntime \
             --hidden-import pillow_heif \
             --hidden-import cv2 \
-            --hidden-import pyshortcuts
+            --hidden-import pyshortcuts \
+            --hidden-import psutil
 
       - name: Install create-dmg
         run: brew install create-dmg

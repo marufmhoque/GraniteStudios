@@ -5,6 +5,13 @@ Generates a self-contained, responsive gallery site styled with Tailwind CSS
 the UI), each rendered as a Masonry grid. Camera + lens info is printed under
 every photo, and images can optionally be auto-edited on the way out.
 
+This module is intentionally a pure function over whatever ``gallery`` dict
+it's handed — it does no selection of its own. The caller (the Web Export
+page in the UI) is responsible for curating that input: only images the
+user has manually checked "Publish to Web", sourced from that folder's
+``-edit`` subfolder (see ``UniversalLoader.get_edit_folder`` /
+``export_keeper``) rather than the original RAW/source files.
+
 The output folder is ready to drop onto any static host.
 """
 

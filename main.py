@@ -12,6 +12,7 @@ Boot sequence:
 """
 
 import ctypes
+import logging
 import platform
 import sys
 from pathlib import Path
@@ -43,6 +44,9 @@ def _fix_windows_taskbar_icon() -> None:
 
 
 def main() -> int:
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+    )
     _fix_windows_taskbar_icon()
 
     from PyQt6.QtCore import QEventLoop, Qt, QTimer
@@ -78,6 +82,13 @@ def main() -> int:
     )
     splash.show()
     app.processEvents()
+
+    # Log the detected hardware profile (CPU/GPU provider, RAM budget) while
+    # the splash is up, so a RAM-aware export budget is known before the
+    # user does anything.
+    from src.engine.hardware import log_hardware_diagnostics
+
+    log_hardware_diagnostics()
 
     # Heavy imports (engine + AI modules) happen here, while the splash is
     # already visible, so the delay is hidden rather than dead air.

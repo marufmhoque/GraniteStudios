@@ -213,6 +213,7 @@ class ThumbnailCell(QLabel):
     """One selectable thumbnail in the grid."""
 
     clicked = pyqtSignal(str)
+    web_toggled = pyqtSignal(str, bool)
 
     def __init__(self, path: str, parent=None):
         super().__init__(parent)
@@ -247,9 +248,24 @@ class ThumbnailCell(QLabel):
         )
         self.label_tag.hide()
 
-        # Bottom strip: EXIF tech info (camera | lens + exposure).
+        # Bottom-left: "Publish to Web" toggle — always visible, independent
+        # of the tech-info overlay so it stays reachable regardless of that
+        # toggle's state.
+        self.web_checkbox = QCheckBox(self)
+        self.web_checkbox.setGeometry(4, h - 26, 20, 20)
+        self.web_checkbox.setToolTip("Publish to Web")
+        self.web_checkbox.setStyleSheet(
+            "QCheckBox { background: transparent; }"
+            "QCheckBox::indicator { width: 18px; height: 18px; border-radius: 4px;"
+            " border: 1.5px solid #E31B23; background-color: rgba(10,11,14,0.85); }"
+            "QCheckBox::indicator:checked { background-color: #E31B23; }"
+        )
+        self.web_checkbox.toggled.connect(lambda checked: self.web_toggled.emit(self.path, checked))
+
+        # Bottom strip: EXIF tech info (camera | lens + exposure). Narrowed
+        # to leave the bottom-left corner clear for the web checkbox above.
         self.tech_label = QLabel(self)
-        self.tech_label.setGeometry(6, h - 44, w - 12, 38)
+        self.tech_label.setGeometry(28, h - 44, w - 34, 38)
         self.tech_label.setWordWrap(True)
         self.tech_label.setStyleSheet(
             "background: rgba(10,11,14,0.82); color: #d8d9de; border-radius: 6px;"
@@ -258,8 +274,15 @@ class ThumbnailCell(QLabel):
         self.tech_label.hide()
 
     def _raise_overlays(self) -> None:
-        for overlay in (self.badge_label, self.label_tag, self.tech_label):
+        for overlay in (self.badge_label, self.label_tag, self.tech_label, self.web_checkbox):
             overlay.raise_()
+
+    def set_web_selected(self, checked: bool) -> None:
+        """Set the web checkbox without re-emitting web_toggled (for syncing
+        UI state from the backend model)."""
+        self.web_checkbox.blockSignals(True)
+        self.web_checkbox.setChecked(checked)
+        self.web_checkbox.blockSignals(False)
 
     def set_pixmap(self, pixmap: QPixmap) -> None:
         self.setPixmap(
@@ -385,8 +408,10 @@ class MainWindow(QMainWindow):
 
         # State
         self.current_folder: Path | None = None
+        self.edit_folder: Path | None = None
         self.image_paths: list[Path] = []
         self.selected: set[str] = set()
+        self.web_selected: set[str] = set()
         self.cells: dict[str, ThumbnailCell] = {}
         self.metadata: dict[str, ImageMetadata] = {}
         self.labels: dict[str, str] = {}
@@ -633,7 +658,10 @@ class MainWindow(QMainWindow):
         preview_scroll.setWidget(self.color_preview)
         layout.addWidget(preview_scroll, stretch=1)
 
-        self.color_status = QLabel("Edited images are saved next to the originals as *_graded.jpg")
+        self.color_status = QLabel(
+            "Edited images are saved into the folder's -edit subfolder as *_graded.jpg — "
+            "originals are never modified."
+        )
         self.color_status.setObjectName("PageSubtitle")
         layout.addWidget(self.color_status)
 
@@ -702,8 +730,17 @@ class MainWindow(QMainWindow):
         top.addWidget(self.web_button)
         layout.addLayout(top)
 
-        self.web_selected_only = QCheckBox("Export selected images only (otherwise: whole library)")
-        layout.addWidget(self.web_selected_only)
+        self.web_selection_status = QLabel("0 images marked for web (checked in Library).")
+        self.web_selection_status.setObjectName("PageSubtitle")
+        layout.addWidget(self.web_selection_status)
+
+        title_row = QHBoxLayout()
+        title_row.setSpacing(10)
+        title_row.addWidget(QLabel("Gallery Name:"))
+        self.gallery_title_input = QLineEdit()
+        self.gallery_title_input.setPlaceholderText("e.g. Vacation 2024 Highlights")
+        title_row.addWidget(self.gallery_title_input, stretch=1)
+        layout.addLayout(title_row)
 
         self.web_group_by_label = QCheckBox("Organize into category tabs by assigned label")
         self.web_group_by_label.setChecked(True)
@@ -715,7 +752,9 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.web_auto_fix)
 
         self.web_status = QLabel(
-            "Images are resized to max 2000px and published with an index.html "
+            "Check “Publish to Web” on thumbnails in Library to choose what gets "
+            "published. Sources are pulled from the folder's -edit subfolder (never "
+            "the originals), resized to max 2000px, and published with an index.html "
             "masonry grid (Tailwind CSS via CDN). Camera + lens info appears under "
             "each photo."
         )
@@ -794,8 +833,11 @@ class MainWindow(QMainWindow):
             return
 
         self.current_folder = Path(folder)
+        # All edits/exports/keepers land here — originals are never touched.
+        self.edit_folder = self.loader.get_edit_folder(self.current_folder)
         self.image_paths = self.loader.scan_folder(self.current_folder)
         self.selected.clear()
+        self.web_selected.clear()
         self.metadata.clear()
         self.labels.clear()
 
@@ -818,13 +860,17 @@ class MainWindow(QMainWindow):
         for i, path in enumerate(self.image_paths):
             cell = ThumbnailCell(str(path))
             cell.clicked.connect(self._on_thumb_clicked)
+            cell.web_toggled.connect(self._on_web_toggle)
             self.grid.addWidget(cell, i // columns, i % columns)
             self.cells[str(path)] = cell
 
         self.progress.setVisible(True)
         self.progress.setMaximum(len(self.image_paths))
         self.progress.setValue(0)
-        self.status_label.setText(f"Loading {len(self.image_paths)} images…")
+        self.status_label.setText(
+            f"Loading {len(self.image_paths)} images… "
+            f"Edits and web keepers will be saved to {self.edit_folder.name}/"
+        )
 
         self._thumb_worker = ThumbnailWorker(self.loader, list(self.image_paths), parent=self)
         self._thumb_worker.thumb_ready.connect(self._on_thumb_ready)
@@ -892,6 +938,30 @@ class MainWindow(QMainWindow):
     def _on_toggle_tech(self, checked: bool) -> None:
         for cell in self.cells.values():
             cell.set_tech_visible(checked)
+
+    def _on_web_toggle(self, path: str, checked: bool) -> None:
+        """Track which images are checked for web publishing.
+
+        Pure state update — no I/O here, so toggling stays instant even
+        when batch-checking many thumbnails. The actual "keeper" JPEG in
+        the -edit subfolder is materialized lazily at export time (see
+        _on_generate_gallery), off the UI thread.
+        """
+        if checked:
+            self.web_selected.add(path)
+        else:
+            self.web_selected.discard(path)
+        self._update_web_status()
+
+    def _update_web_status(self) -> None:
+        count = len(self.web_selected)
+        self.status_label.setText(
+            f"{len(self.image_paths)} images · {len(self.selected)} selected · "
+            f"{count} marked for web"
+        )
+        if hasattr(self, "web_selection_status"):
+            noun = "image" if count == 1 else "images"
+            self.web_selection_status.setText(f"{count} {noun} marked for web (checked in Library).")
 
     # ------------------------------------------------------------------ #
     # Task plumbing
@@ -987,10 +1057,14 @@ class MainWindow(QMainWindow):
                 self, "No selection", "Select one or more images in Library first."
             )
             return
+        if self.edit_folder is None:
+            QMessageBox.information(self, "No folder", "Load a folder in Library first.")
+            return
 
         mode = self.color_mode.currentText()
         filter_name = self.filter_combo.currentText()
         color_name = self.color_combo.currentText()
+        edit_folder = self.edit_folder
 
         def work():
             outputs: list[Path] = []
@@ -1003,7 +1077,10 @@ class MainWindow(QMainWindow):
                     result = self.color_engine.selective_color(arr, color_name)
                 else:
                     result = self.color_engine.apply_lut_filter(arr, filter_name)
-                out_path = path.with_name(f"{path.stem}_graded.jpg")
+                # Graded output goes into the -edit subfolder, never next to
+                # the original — this is also what the web publisher pulls
+                # from when this image is checked for web (see Task 3).
+                out_path = edit_folder / f"{path.stem}_graded.jpg"
                 Image.fromarray(result).save(out_path, "JPEG", quality=94)
                 outputs.append(out_path)
                 last_preview = Image.fromarray(result)
@@ -1016,7 +1093,8 @@ class MainWindow(QMainWindow):
                 preview.thumbnail((1100, 700), Image.Resampling.LANCZOS)
                 self.color_preview.setPixmap(pil_to_pixmap(preview))
             self.color_status.setText(
-                f"Saved {len(outputs)} graded image(s) next to the originals."
+                f"Saved {len(outputs)} graded image(s) to {edit_folder.name}/ "
+                "(originals untouched)."
             )
 
         self._run_task(work, done, self.apply_color_button)
@@ -1081,48 +1159,56 @@ class MainWindow(QMainWindow):
         if not self._require_library():
             return
 
-        if self.web_selected_only.isChecked():
-            targets = self._selected_paths()
-            if not targets:
-                QMessageBox.information(
-                    self, "No selection", "Select images in Library, or untick the checkbox."
-                )
-                return
-        else:
-            targets = list(self.image_paths)
+        if not self.web_selected:
+            QMessageBox.information(
+                self,
+                "Nothing marked for web",
+                'Check "Publish to Web" on one or more thumbnails in Library first.',
+            )
+            return
+        if self.edit_folder is None or self.current_folder is None:
+            QMessageBox.information(self, "No folder", "Load a folder in Library first.")
+            return
 
         out_dir = QFileDialog.getExistingDirectory(self, "Choose gallery output folder")
         if not out_dir:
             return
 
+        targets = [Path(p) for p in self.web_selected]
         group_by_label = self.web_group_by_label.isChecked()
         auto_fix = self.web_auto_fix.isChecked()
+        gallery_title = self.gallery_title_input.text().strip() or "Granite Studios Gallery"
+        edit_folder = self.edit_folder
+        current_folder = self.current_folder
 
-        # Build the {category: [items]} structure the publisher expects,
-        # attaching each image's gear caption from its EXIF metadata.
-        gallery: dict[str, list[dict]] = {}
-        for path in targets:
-            key = str(path)
-            category = self.labels.get(key, "Unlabeled") if group_by_label else "All Photos"
-            meta = self.metadata.get(key)
-            gallery.setdefault(category, []).append(
-                {
-                    "path": path,
-                    "gear": meta.gear_label if isinstance(meta, ImageMetadata) else "",
-                }
-            )
-
-        self.web_status.setText(
-            f"Publishing {len(targets)} images into {len(gallery)} categor"
-            f"{'y' if len(gallery) == 1 else 'ies'}…"
-        )
+        self.web_status.setText(f"Publishing {len(targets)} images…")
 
         def work():
-            return generate_static_gallery(gallery, out_dir, auto_fix=auto_fix)
+            # Source images always come from the -edit subfolder — the
+            # graded version if one exists, otherwise a flattened "keeper"
+            # JPEG materialized here on demand. Originals are never read
+            # from directly for the website.
+            gallery: dict[str, list[dict]] = {}
+            for original in targets:
+                key = str(original)
+                graded = edit_folder / f"{original.stem}_graded.jpg"
+                source = graded if graded.exists() else self.loader.export_keeper(
+                    original, current_folder
+                )
+
+                category = self.labels.get(key, "Unlabeled") if group_by_label else "All Photos"
+                meta = self.metadata.get(key)
+                gallery.setdefault(category, []).append(
+                    {
+                        "path": source,
+                        "gear": meta.gear_label if isinstance(meta, ImageMetadata) else "",
+                    }
+                )
+            return generate_static_gallery(gallery, out_dir, title=gallery_title, auto_fix=auto_fix)
 
         def done(index_path):
             self.web_status.setText(
-                f"Gallery published: {index_path}\nOpen index.html in a browser."
+                f"Gallery “{gallery_title}” published: {index_path}\nOpen index.html in a browser."
             )
 
         self._run_task(work, done, self.web_button)
