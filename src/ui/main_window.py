@@ -41,6 +41,7 @@ from src.engine.resources import resource_path
 from src.engine.universal_loader import UniversalLoader, ImageMetadata
 from src.ai_tools.culling import SmartCull
 from src.ai_tools.color_engine import ColorEngine
+from src.ai_tools.background_removal import BackgroundRemover
 from src.social.reel_maker import ScrlReelMaker
 from src.social.ig_sync import IgFormatter
 from src.web.publisher import generate_static_gallery
@@ -403,6 +404,7 @@ class MainWindow(QMainWindow):
         self.loader = UniversalLoader()
         self.culler = SmartCull(loader=self.loader)
         self.color_engine = ColorEngine()
+        self.bg_remover = BackgroundRemover()
         self.reel_maker = ScrlReelMaker(loader=self.loader)
         self.ig_formatter = IgFormatter(loader=self.loader)
 
@@ -648,6 +650,16 @@ class MainWindow(QMainWindow):
         controls.addStretch()
         layout.addLayout(controls)
 
+        # Background removal (separate row).
+        bg_row = QHBoxLayout()
+        bg_row.addWidget(QLabel("Remove background:"))
+        self.remove_bg_button = QPushButton("Remove BG & Export as PNG")
+        self.remove_bg_button.setObjectName("ActionButton")
+        self.remove_bg_button.clicked.connect(self._on_remove_background)
+        bg_row.addWidget(self.remove_bg_button)
+        bg_row.addStretch()
+        layout.addLayout(bg_row)
+
         self.color_preview = QLabel("Select an image in Library, choose a mode, and apply.")
         self.color_preview.setObjectName("PageSubtitle")
         self.color_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -659,8 +671,8 @@ class MainWindow(QMainWindow):
         layout.addWidget(preview_scroll, stretch=1)
 
         self.color_status = QLabel(
-            "Edited images are saved into the folder's -edit subfolder as *_graded.jpg — "
-            "originals are never modified."
+            "Edited images are saved into the folder's -edit subfolder as *_graded.jpg or *_nobg.png — "
+            "originals are never modified. Background removal outputs RGBA PNG with transparency."
         )
         self.color_status.setObjectName("PageSubtitle")
         layout.addWidget(self.color_status)
@@ -1098,6 +1110,53 @@ class MainWindow(QMainWindow):
             )
 
         self._run_task(work, done, self.apply_color_button)
+
+    def _on_remove_background(self) -> None:
+        """Remove background from selected images, export as transparent PNG."""
+        targets = self._selected_paths()
+        if not targets:
+            QMessageBox.information(
+                self, "No selection", "Select one or more images in Library first."
+            )
+            return
+        if self.edit_folder is None:
+            QMessageBox.information(self, "No folder", "Load a folder in Library first.")
+            return
+
+        edit_folder = self.edit_folder
+
+        def work():
+            outputs: list[Path] = []
+            last_preview = None
+            for path in targets:
+                arr = self.loader.load_array(path)
+                if arr is None:
+                    continue
+                # Remove background using AI segmentation, returns RGBA.
+                result_rgba = self.bg_remover.remove_background_array(arr)
+                out_path = edit_folder / f"{path.stem}_nobg.png"
+                Image.fromarray(result_rgba, "RGBA").save(out_path, "PNG", optimize=True)
+                outputs.append(out_path)
+                # Preview is the alpha channel so the user sees what was kept.
+                if len(result_rgba.shape) == 3 and result_rgba.shape[2] == 4:
+                    alpha = result_rgba[:, :, 3]
+                    # Convert grayscale alpha to RGB for display.
+                    rgb_alpha = np.stack([alpha, alpha, alpha], axis=2)
+                    last_preview = Image.fromarray(rgb_alpha.astype(np.uint8))
+            return outputs, last_preview
+
+        def done(result):
+            outputs, last_preview = result
+            if last_preview is not None:
+                preview = last_preview.copy()
+                preview.thumbnail((1100, 700), Image.Resampling.LANCZOS)
+                self.color_preview.setPixmap(pil_to_pixmap(preview))
+            self.color_status.setText(
+                f"Removed background from {len(outputs)} image(s), saved as *_nobg.png "
+                "(RGBA with transparency) to {edit_folder.name}/."
+            )
+
+        self._run_task(work, done, self.remove_bg_button)
 
     # ------------------------------------------------------------------ #
     # Reel / IG actions

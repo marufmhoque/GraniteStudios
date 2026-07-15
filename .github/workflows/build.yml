@@ -56,7 +56,8 @@ jobs:
             --hidden-import pillow_heif \
             --hidden-import cv2 \
             --hidden-import pyshortcuts \
-            --hidden-import psutil
+            --hidden-import psutil \
+            --hidden-import rembg
 
       - name: Install create-dmg
         run: brew install create-dmg

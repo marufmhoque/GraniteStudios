@@ -9,3 +9,4 @@ onnxruntime
 instagrapi
 pyshortcuts
 psutil
+rembg
