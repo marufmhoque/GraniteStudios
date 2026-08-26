@@ -1,0 +1,7 @@
+{
+  "rewrites": [
+    { "source": "/tools/granite-studios/assets/:path*", "destination": "/assets/:path*" },
+    { "source": "/tools/granite-studios/:path*", "destination": "/index.html" },
+    { "source": "/tools/granite-studios", "destination": "/index.html" }
+  ]
+}

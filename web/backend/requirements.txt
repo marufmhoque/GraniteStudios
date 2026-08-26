@@ -1,0 +1,15 @@
+# Web service dependencies. Deliberately excludes the desktop-only packages
+# (PyQt6, pyshortcuts, instagrapi) so the server image stays small.
+fastapi
+uvicorn[standard]
+python-multipart
+Pillow
+pillow-heif
+rawpy
+numpy
+opencv-python-headless
+imageio-ffmpeg
+moviepy
+onnxruntime
+rembg
+psutil

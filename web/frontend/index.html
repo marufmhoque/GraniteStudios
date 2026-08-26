@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Granite Studios — AI Photo &amp; Video Suite</title>
+  <meta name="description"
+    content="Browser-based AI photo and video editing: background removal, cinematic grading, trimming, reframing, stabilization and social exports." />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link
+    href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,600;0,700;0,800;1,400;1,600&family=Inter:wght@300;400;500;600&display=swap"
+    rel="stylesheet">
+  <script>
+    // Mirrors the portfolio site's Tailwind theme so the tool reads as part
+    // of marufhoque.com rather than a bolted-on iframe.
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            serif: ['"Playfair Display"', 'serif'],
+            sans: ['"Inter"', 'sans-serif'],
+          },
+          colors: {
+            brand: {
+              teal: '#154745',
+              ivory: '#F5F2E9',
+              gold: '#CCA45C',
+            }
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    body {
+      background-color: #F5F2E9;
+      color: #154745;
+      font-family: "Inter", sans-serif;
+    }
+
+    .checkerboard {
+      background-image:
+        linear-gradient(45deg, #d8d4c6 25%, transparent 25%),
+        linear-gradient(-45deg, #d8d4c6 25%, transparent 25%),
+        linear-gradient(45deg, transparent 75%, #d8d4c6 75%),
+        linear-gradient(-45deg, transparent 75%, #d8d4c6 75%);
+      background-size: 16px 16px;
+      background-position: 0 0, 0 8px, 8px -8px, -8px 0px;
+    }
+  </style>
+</head>
+
+<body>
+  <div id="root"></div>
+  <script type="module" src="/src/main.tsx"></script>
+</body>
+
+</html>

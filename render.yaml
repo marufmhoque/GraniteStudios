@@ -1,0 +1,19 @@
+# Render blueprint for the Granite Studios web API.
+# In Render: New > Blueprint > point at this repo. The free plan spins down
+# when idle, so the first request after a quiet period takes ~30-60s.
+services:
+  - type: web
+    name: granite-studios-api
+    runtime: docker
+    dockerfilePath: ./web/backend/Dockerfile
+    dockerContext: .
+    plan: free
+    healthCheckPath: /api/health
+    envVars:
+      - key: GRANITE_STORAGE_ROOT
+        value: /tmp/granite-web
+      - key: GRANITE_MAX_UPLOAD_MB
+        value: "200"
+      # Add the deployed frontend's own origin here once it exists.
+      - key: GRANITE_ALLOWED_ORIGINS
+        value: https://marufhoque.com,https://www.marufhoque.com,http://localhost:5173

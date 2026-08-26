@@ -29,6 +29,11 @@ pip install -r requirements.txt
 python main.py
 ```
 
+### In the Browser
+A hosted web version runs the same engines with no install — upload photos or
+video, edit, and download the results. See [web/README.md](web/README.md) for the
+architecture and deployment steps.
+
 ## Features
 
 ### Library & Culling
@@ -112,6 +117,10 @@ RAM is automatically profiled at startup. Large operations (batch exports) are s
 │   │   └── api.py            # Optional local FastAPI REST server
 │   └── ui/
 │       └── main_window.py    # PyQt6 dark-theme professional interface
+├── web/                      # Browser version (see web/README.md)
+│   ├── backend/              # FastAPI service wrapping src/ engines (Docker → Render)
+│   └── frontend/             # React + Vite + Tailwind UI (→ Vercel)
+├── render.yaml               # Render blueprint for the web backend
 ├── package_windows.py        # PyInstaller builder for .exe (Pillow icon conversion)
 └── .github/workflows/build.yml # CI: macOS .dmg builder
 ```
