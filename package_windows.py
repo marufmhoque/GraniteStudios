@@ -42,6 +42,10 @@ HIDDEN_IMPORTS = [
     "psutil",
     "rembg",
     "onnxruntime",
+    "imageio_ffmpeg",
+    "fastapi",
+    "uvicorn",
+    "pydantic",
 ]
 
 ICO_SIZES = [(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
@@ -119,6 +123,11 @@ def build() -> None:
 
     for mod in HIDDEN_IMPORTS:
         args += ["--hidden-import", mod]
+
+    # imageio_ffmpeg ships its bundled ffmpeg.exe as package data, not code —
+    # PyInstaller's import analysis can't see it, so it has to be collected
+    # explicitly or the packaged app has no working video engine.
+    args += ["--collect-data", "imageio_ffmpeg"]
 
     print("Running PyInstaller with:")
     print("  " + " ".join(args))

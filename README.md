@@ -52,6 +52,22 @@ python main.py
 - **Panoramic reels**: 3–7 images stitched into a massive panorama, with a 1080×1920 viewport sliding left-to-right over 10 seconds (MP4)
 - **IG formatting**: Auto-pad any image to exact 4:5 (feed) or 9:16 (story) with a blurred, darkened background
 
+### Background Removal
+- **AI segmentation**: One-click background removal via `rembg` (U2Net ONNX model), CPU-friendly and GPU-independent
+- **Transparent PNG export**: Outputs `*_nobg.png` (RGBA) to the edit folder, ready for compositing
+
+### Video Editor
+A full FFmpeg + OpenCV video engine, ships its own FFmpeg binary (`imageio-ffmpeg`) so it works with no system install:
+- **Timing**: trim, reverse, freeze-frame, constant/ramped speed changes, time-lapse condensation (e.g. a 30-minute file → a 30-second highlight)
+- **Framing**: aspect-ratio conversion (16:9/9:16/1:1/4:5/4:3, crop or letterbox), explicit bounding-box crop, subject-aware auto-crop (Haar-cascade face detection with a center-crop fallback), OpenCV point-feature stabilization, static-region redaction
+- **Structure**: split/trim, multi-clip concat, crossfade/wipe transitions (`xfade`/`acrossfade`), J-cut/L-cut audio offsetting
+- **Audio**: track mixing, EBU R128 loudness normalization, sidechain auto-ducking, FFT noise reduction (`afftdn`), volume adjustment
+- **Color**: brightness/contrast/saturation/gamma correction, temperature-based white balance, 3D LUT (`.cube`) application
+- **Export presets**: Web MP4 (H.264/faststart), high-quality MOV, WebM (VP9/Opus), Instagram Reel (1080×1920)
+- **Universal ingestion**: MP4, MOV, AVI, MKV, WebM, FLV — any container/codec FFmpeg can decode
+- **Local REST API**: optional FastAPI server (`src/video/api.py`, toggled from the Video Editor tab) exposes `/probe`, `/jobs`, `/concat`, `/transition` so external scripts can drive the engine over HTTP
+- **Hardware-sized job pool**: multi-step pipelines run through a background thread pool sized to leave CPU headroom, matching the same conservative philosophy as the photo side's RAM budgeting
+
 ## Hardware Support
 
 Granite Studios detects your hardware and picks the best engine:
@@ -76,12 +92,24 @@ RAM is automatically profiled at startup. Large operations (batch exports) are s
 │   │   └── create_shortcut.py # First-run Desktop/Start Menu shortcuts
 │   ├── ai_tools/
 │   │   ├── culling.py        # Sharpness scoring, burst grouping, perceptual hashing
-│   │   └── color_engine.py   # Selective color, cinematic filters, auto-edit
+│   │   ├── color_engine.py   # Selective color, cinematic filters, auto-edit
+│   │   └── background_removal.py # AI background removal (rembg / U2Net)
 │   ├── social/
 │   │   ├── reel_maker.py     # Panoramic video stitcher (moviepy)
 │   │   └── ig_sync.py        # Instagram feed/story formatter
 │   ├── web/
 │   │   └── publisher.py      # Static Tailwind gallery generator
+│   ├── video/                # FFmpeg + OpenCV video editing engine
+│   │   ├── ffmpeg_utils.py   # Bundled-ffmpeg resolution, probing, subprocess wrapper
+│   │   ├── normalize.py      # fps/sample-rate/resolution normalization pass
+│   │   ├── timing.py         # Trim, reverse, freeze-frame, speed ramp, time-lapse
+│   │   ├── spatial.py        # Aspect conversion, crop, auto-crop, stabilization
+│   │   ├── structure.py      # Split, concat, transitions, J/L cuts
+│   │   ├── audio.py          # Mixing, loudness norm, auto-duck, denoise
+│   │   ├── color.py          # Color correction, 3D LUT application
+│   │   ├── export.py         # Container/codec/bitrate export presets
+│   │   ├── pipeline.py       # VideoJob/JobManager — multi-step async pipelines
+│   │   └── api.py            # Optional local FastAPI REST server
 │   └── ui/
 │       └── main_window.py    # PyQt6 dark-theme professional interface
 ├── package_windows.py        # PyInstaller builder for .exe (Pillow icon conversion)
@@ -109,6 +137,12 @@ RAM is automatically profiled at startup. Large operations (batch exports) are s
 ### 4. Export Socials
 - **Reel Maker**: Select 3–7 images → outputs an MP4 panoramic scroll
 - **IG Formatter**: Select images → pads them to 4:5 or 9:16 with a blurred background
+
+### 5. Edit Video
+- Click **Load Video** in the Video Editor tab (any MP4/MOV/AVI/MKV/WebM/FLV file)
+- Run operations in any order — trim, speed, reframe, stabilize, color-correct, denoise. Each one saves into `<video-name>-edit/` and becomes the input to the next, so they chain; **Reset to Original** starts over
+- Pick an **Export preset** (Web MP4, MOV, WebM, Instagram Reel) and click **Export**
+- Optionally click **Start Local API Server** to drive the same engine from an external script over HTTP (`http://127.0.0.1:8756/docs`)
 
 ## Development
 
@@ -140,9 +174,12 @@ All core modules compile and have been smoke-tested:
 - **PyQt6**: Desktop UI (dark theme, fade transitions, hardware info display)
 - **rawpy**: RAW demosaicing + embedded thumbnail extraction
 - **Pillow / pillow-heif**: JPEG, PNG, HEIC support
-- **OpenCV**: Sharpness analysis, selective color masking
+- **OpenCV**: Sharpness analysis, selective color masking, video stabilization/auto-crop
 - **numpy**: Image arrays, matrix math for color grading
 - **moviepy**: Reel rendering
+- **rembg**: AI background removal (U2Net ONNX model)
+- **imageio-ffmpeg**: Bundled FFmpeg binary for the video engine — no system install required
+- **fastapi / uvicorn**: Optional local REST API for the video engine
 - **psutil**: RAM and CPU core detection
 
 ## Architecture Highlights

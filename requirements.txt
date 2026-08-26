@@ -10,3 +10,6 @@ instagrapi
 pyshortcuts
 psutil
 rembg
+imageio-ffmpeg
+fastapi
+uvicorn[standard]

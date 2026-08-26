@@ -57,7 +57,12 @@ jobs:
             --hidden-import cv2 \
             --hidden-import pyshortcuts \
             --hidden-import psutil \
-            --hidden-import rembg
+            --hidden-import rembg \
+            --hidden-import imageio_ffmpeg \
+            --hidden-import fastapi \
+            --hidden-import uvicorn \
+            --hidden-import pydantic \
+            --collect-data imageio_ffmpeg
 
       - name: Install create-dmg
         run: brew install create-dmg
