@@ -59,11 +59,17 @@ def freeze_frame(
     """Freeze the frame at ``at_sec`` for ``hold_sec``, splicing it into the timeline."""
     input_path, output_path = Path(input_path), Path(output_path)
     info = probe(input_path)
-    frame_dur = 1 / info.fps if info.fps else 0.033
-    tpad = f"tpad=stop_mode=clone:stop_duration={hold_sec}"
+    fps = info.fps or 30.0
+    frame_dur = 1 / fps
+    # Hold the frame by duplicating it with `loop`, then rebuild timestamps.
+    # `tpad` is the more obvious filter here but silently emits nothing on a
+    # single-frame stream: with no second frame it cannot infer a frame
+    # duration, so it clones zero frames and the freeze vanishes.
+    hold_frames = max(1, int(round(hold_sec * fps)))
+    freeze = f"loop=loop={hold_frames}:size=1:start=0,setpts=N/{fps}/TB"
     filter_complex = (
         f"[0:v]trim=0:{at_sec},setpts=PTS-STARTPTS[v1];"
-        f"[0:v]trim={at_sec}:{at_sec + frame_dur},setpts=PTS-STARTPTS,{tpad}[vfreeze];"
+        f"[0:v]trim={at_sec}:{at_sec + frame_dur},setpts=PTS-STARTPTS,{freeze}[vfreeze];"
         f"[0:v]trim={at_sec},setpts=PTS-STARTPTS[v2];"
         f"[v1][vfreeze][v2]concat=n=3:v=1:a=0[outv]"
     )

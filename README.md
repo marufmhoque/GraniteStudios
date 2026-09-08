@@ -7,7 +7,7 @@
 - 🎨 **AI color grading**: Selective color isolation, cinematic matrix filters, one-click auto-edit
 - 📹 **Reel maker**: Turn 3–7 images into a scrolling 9:16 panoramic video
 - 🌐 **Web publisher**: Responsive Masonry gallery with category tabs and camera metadata
-- 💾 **Edit-safe workflow**: All edits, exports, and "keepers" live in a separate `-edit` subfolder; originals never touched
+- 💾 **Edit-safe workflow**: Edits and "keepers" are written to an `-edit` subfolder; your originals are never modified or moved
 
 ## Quick Start
 
@@ -144,13 +144,13 @@ RAM is automatically profiled at startup. Large operations (batch exports) are s
 - Click **Generate Gallery** → responsive HTML + images ready to upload to any web host
 
 ### 4. Export Socials
-- **Reel Maker**: Select 3–7 images → outputs an MP4 panoramic scroll
-- **IG Formatter**: Select images → pads them to 4:5 or 9:16 with a blurred background
+- **Reel Maker**: Select 3–7 images → choose where to save → outputs a 1080×1920 MP4 panoramic scroll (selecting fewer than 3 or more than 7 is rejected)
+- **IG Formatter**: Select images → choose an export folder → each is padded to exactly 1080×1350 (feed) or 1080×1920 (story) over a blurred, darkened copy of itself
 
 ### 5. Edit Video
 - Click **Load Video** in the Video Editor tab (any MP4/MOV/AVI/MKV/WebM/FLV file)
 - Run operations in any order — trim, speed, reframe, stabilize, color-correct, denoise. Each one saves into `<video-name>-edit/` and becomes the input to the next, so they chain; **Reset to Original** starts over
-- Pick an **Export preset** (Web MP4, MOV, WebM, Instagram Reel) and click **Export**
+- Pick an **Export preset** and click **Export** — Web MP4 (H.264, faststart, capped at 1920 wide), MOV (high-quality H.264), WebM (VP9/Opus), or Instagram Reel, which fits and pads the clip to exactly 1080×1920 whatever the source shape
 - Optionally click **Start Local API Server** to drive the same engine from an external script over HTTP (`http://127.0.0.1:8756/docs`)
 
 ## Development
@@ -172,12 +172,28 @@ pyinstaller main.py --name "Granite Studios" --windowed --onedir \
 ```
 
 ### Testing
-All core modules compile and have been smoke-tested:
-- `hardware.py`: CPU/GPU detection, RAM profiling
-- `universal_loader.py`: Preview caching, RAW thumbnails, EXIF extraction
-- `culling.py`: Sharpness scoring, perceptual hashing, burst grouping
-- `color_engine.py`: Selective color, cinematic filters
-- `publisher.py`: Category-tabbed gallery generation
+There is no automated test suite yet. Verification is done by exercising the
+real engines against generated media, and by driving the PyQt6 window itself
+with `QT_QPA_PLATFORM=offscreen` so every button's handler runs headlessly.
+
+What that covers today:
+
+| Area | Verified |
+| --- | --- |
+| `hardware.py` | RAM profiling; export budget = half available, capped at 8GB |
+| `universal_loader.py` | Folder scan, RAW/HEIC/JPEG/PNG support, preview + array decode, EXIF, `-edit` folder creation |
+| `culling.py` | Sharpness ranks sharp above blurred; perceptual hash flags near-duplicates; burst grouping |
+| `color_engine.py` | All 6 cinematic filters; all 8 selective-colour hues (isolated hue stays saturated, rest goes mono); auto-fix; brightness/contrast/saturation |
+| `background_removal.py` | Returns RGBA at source size with a non-uniform alpha channel |
+| `ig_sync.py` | Exact 1080×1350 feed and 1080×1920 story output |
+| `reel_maker.py` | 1080×1920 MP4 at the requested duration; rejects fewer than 3 or more than 7 images |
+| `publisher.py` | Category tabs, custom title, responsive masonry, images emitted |
+| `video/` | Every timing, spatial, structure, audio, and colour operation; all 4 export presets; `.cube` LUT; multi-step `JobManager` pipelines including the failure path |
+| `video/api.py` | `/probe`, `/jobs`, `/jobs/{id}`, `/concat`, `/transition`, plus 400/404 handling |
+| `ui/main_window.py` | Window construction, folder load, video load, and all ten video operations chained through their real handlers |
+
+Contributions that add a proper `pytest` suite are very welcome — see
+[Contributing](#contributing).
 
 ### Key Dependencies
 - **PyQt6**: Desktop UI (dark theme, fade transitions, hardware info display)
@@ -194,10 +210,28 @@ All core modules compile and have been smoke-tested:
 ## Architecture Highlights
 
 ### Edit-Safe Workflow
-Every project gets a sibling `-edit` subfolder:
-- **Original folder**: `Vacation2024/` (unchanged)
-- **Edit folder**: `Vacation2024-edit/` (graded JPEGs, keeper flattens, resizes)
-- **Web exports** pull exclusively from the edit folder
+Loading a folder creates an `-edit` folder *inside* it, named after the folder,
+and edits land there instead of next to your originals:
+
+```
+Vacation2024/                 # your originals — never modified or moved
+├── DSC_0001.NEF
+├── DSC_0002.NEF
+└── Vacation2024-edit/        # created on load
+    ├── DSC_0001_graded.jpg   # cinematic filter / selective colour / auto-fix
+    ├── DSC_0002_nobg.png     # background removal
+    └── DSC_0001.jpg          # keeper flatten of the RAW
+```
+
+The video editor follows the same rule per file — loading `clip.mp4` creates
+`clip-edit/` beside it, and each operation writes a new file there rather than
+overwriting the last, which is what lets operations chain and **Reset to
+Original** work.
+
+The three *publishing* actions — panoramic reel, Instagram export, and
+**Generate Gallery** — ask you where to save instead, since those outputs
+usually belong somewhere else entirely. The gallery still reads its images
+exclusively from the edit folder.
 
 ### Hardware Adaptation
 At startup, the app logs detected CPU cores, RAM, ONNX execution provider, and calculates a safe export budget (half of available RAM, capped at 8GB). This ensures batch operations never OOM or freeze the OS.

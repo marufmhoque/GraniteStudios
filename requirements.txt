@@ -6,10 +6,10 @@ opencv-python-headless
 moviepy
 numpy
 onnxruntime
-instagrapi
 pyshortcuts
 psutil
 rembg
 imageio-ffmpeg
 fastapi
+pydantic
 uvicorn[standard]

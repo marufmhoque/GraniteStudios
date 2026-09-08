@@ -9,9 +9,28 @@ from pathlib import Path
 from .ffmpeg_utils import run_ffmpeg
 
 
+# Containers disagree about which audio codecs they accept: PCM is fine in WAV
+# but the MP4/M4A muxer rejects it outright ("could not find tag for codec"),
+# so the codec has to follow the extension the caller asked for.
+_AUDIO_CODEC_BY_EXT = {
+    ".wav": "pcm_s16le",
+    ".aif": "pcm_s16be",
+    ".aiff": "pcm_s16be",
+    ".flac": "flac",
+    ".mp3": "libmp3lame",
+    ".opus": "libopus",
+    ".ogg": "libvorbis",
+    ".m4a": "aac",
+    ".aac": "aac",
+    ".mp4": "aac",
+}
+
+
 def extract_audio(input_path: str | Path, output_path: str | Path) -> Path:
+    """Strip the audio track out to its own file, encoded to suit the extension."""
     input_path, output_path = Path(input_path), Path(output_path)
-    run_ffmpeg(["-i", str(input_path), "-vn", "-c:a", "pcm_s16le", str(output_path)])
+    codec = _AUDIO_CODEC_BY_EXT.get(output_path.suffix.lower(), "aac")
+    run_ffmpeg(["-i", str(input_path), "-vn", "-c:a", codec, str(output_path)])
     return output_path
 
 
@@ -42,7 +61,9 @@ def mix_audio_tracks(
     for p in track_paths:
         args += ["-i", str(p)]
 
-    per_track = "".join(f"[{i}:a]volume={v}[a{i}]" for i, v in enumerate(volumes))
+    # Filter chains are ";"-delimited; joining on "" runs them together and
+    # ffmpeg rejects the graph with "trailing garbage after a filter".
+    per_track = ";".join(f"[{i}:a]volume={v}[a{i}]" for i, v in enumerate(volumes))
     mix_in = "".join(f"[a{i}]" for i in range(len(track_paths)))
     filter_complex = f"{per_track};{mix_in}amix=inputs={len(track_paths)}:duration=longest[out]"
 

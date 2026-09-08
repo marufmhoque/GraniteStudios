@@ -20,6 +20,10 @@ class ExportPreset:
     video_bitrate: str | None = None
     audio_bitrate: str = "192k"
     max_width: int | None = None
+    # Exact output frame. Unlike max_width (which only ever shrinks a source
+    # that is already too wide), this pins the frame for targets that mandate
+    # one -- the source is fitted inside it and padded, never stretched.
+    target_resolution: tuple[int, int] | None = None
     extra_args: tuple[str, ...] = ()
 
 
@@ -38,7 +42,8 @@ PRESETS: dict[str, ExportPreset] = {
     ),
     "instagram_reel": ExportPreset(
         name="Instagram Reel (1080x1920 MP4)", container="mp4", video_codec="libx264", audio_codec="aac",
-        crf=20, max_width=1080, extra_args=("-pix_fmt", "yuv420p", "-movflags", "+faststart"),
+        crf=20, target_resolution=(1080, 1920),
+        extra_args=("-pix_fmt", "yuv420p", "-movflags", "+faststart"),
     ),
 }
 
@@ -62,6 +67,12 @@ def export(
     vf_parts = []
     if resolution:
         vf_parts.append(f"scale={resolution[0]}:{resolution[1]}")
+    elif preset_obj.target_resolution:
+        tw, th = preset_obj.target_resolution
+        vf_parts.append(
+            f"scale={tw}:{th}:force_original_aspect_ratio=decrease,"
+            f"pad={tw}:{th}:(ow-iw)/2:(oh-ih)/2,setsar=1"
+        )
     elif preset_obj.max_width and info.width > preset_obj.max_width:
         vf_parts.append(f"scale={preset_obj.max_width}:-2")
 
