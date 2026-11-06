@@ -643,6 +643,14 @@ class MainWindow(QMainWindow):
         self.xmp_button.clicked.connect(self._on_write_xmp)
         target_row.addWidget(self.xmp_button)
 
+        self.cull_eyes_check = QCheckBox("Skip blinks")
+        self.cull_eyes_check.setToolTip(
+            "Detect faces and closed eyes, then prefer an open-eyed frame "
+            "over a sharper one where everybody blinked. Slower, since every "
+            "frame runs through the face model."
+        )
+        target_row.addWidget(self.cull_eyes_check)
+
         self.xmp_reject_check = QCheckBox("Mark non-picks as rejected")
         self.xmp_reject_check.setToolTip(
             "Write rating -1 (Lightroom's reject flag) instead of leaving "
@@ -1318,8 +1326,10 @@ class MainWindow(QMainWindow):
             f"Scoring every frame and selecting the best {target:,}…"
         )
 
+        check_eyes = self.cull_eyes_check.isChecked()
+
         def work():
-            return self.culler.cull_to_target(folder, target)
+            return self.culler.cull_to_target(folder, target, check_eyes=check_eyes)
 
         def done(frames):
             self.last_cull_frames = frames
@@ -1340,6 +1350,24 @@ class MainWindow(QMainWindow):
                     lines.append(f"     {f.path.name}   sharpness {f.sharpness:,.0f}")
                 if len(rest) > 200:
                     lines.append(f"     … and {len(rest) - 200:,} more")
+            checked = [f for f in frames if f.eyes_checked]
+            if check_eyes and not checked:
+                lines.insert(
+                    0,
+                    "Note: the face model could not be loaded, so blinks were "
+                    "not checked. Selection fell back to sharpness only."
+                    + "\n",
+                )
+            elif checked:
+                blinks = [f for f in checked if f.eyes_closed]
+                faces = sum(f.face_count for f in checked)
+                lines.insert(
+                    0,
+                    f"Faces found in {sum(1 for f in checked if f.face_count):,} "
+                    f"frame(s) ({faces:,} face(s) total). "
+                    f"{len(blinks):,} frame(s) had closed eyes and were demoted."
+                    + "\n",
+                )
             self.cull_results.setText("\n".join(lines))
             self._apply_cull_state_to_grid(frames)
 

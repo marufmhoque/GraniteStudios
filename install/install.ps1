@@ -68,7 +68,8 @@ function Find-Python {
         try { $listed = & $launcher.Source -0p } catch { $listed = @() }
         $ErrorActionPreference = $prev
         foreach ($line in @($listed)) {
-            $m = [regex]::Match("$line", '([A-Za-z]:\[^
+            $m = [regex]::Match("$line", '([A-Za-z]:\[^
+
 ]*?python\.exe)')
             if ($m.Success) {
                 $info = Get-PythonInfo $m.Groups[1].Value @()
@@ -199,6 +200,17 @@ Ok 'Dependencies installed.'
 Say 'Fetching the background-removal AI model...'
 & $VenvPy -c "from rembg import new_session; new_session()" 2>$null | Out-Null
 if ($LASTEXITCODE -eq 0) { Ok 'AI model ready.' } else { Warn 'Model will download on first use instead.' }
+
+# Face detector for blink detection (~230KB, checksum-pinned). Also optional.
+Say 'Fetching the face-detection model (for blink detection)...'
+$prevEA = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+Push-Location $InstallDir
+& $VenvPy -c "import sys; sys.path.insert(0,'.'); from src.ai_tools.face_analysis import ensure_model; sys.exit(0 if ensure_model() else 1)" 2>$null | Out-Null
+$faceOk = ($LASTEXITCODE -eq 0)
+Pop-Location
+$ErrorActionPreference = $prevEA
+if ($faceOk) { Ok 'Face model ready.' } else { Warn 'Blink detection will be unavailable until this model can be downloaded.' }
 
 # ------------------------------------------------------------- Shortcuts ----
 # Arguments are quoted here. Without the quotes, an install path containing a

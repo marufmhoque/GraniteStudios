@@ -58,6 +58,7 @@ architecture and deployment steps.
 ### Library & Culling
 - **Universal loader**: One-click folder import. Embedded RAW thumbnails cached for instant preview scrolling
 - **Smart cull**: Laplacian-variance sharpness scoring + timestamp-based burst grouping. Auto-stars the top 2 sharpest of each burst
+- **Blink detection**: YuNet (OpenCV's DNN face detector) finds faces, then each eye is scored for openness. With **Skip blinks** enabled, an open-eyed frame outranks a *sharper* one where everybody blinked — a crisp photo of closed eyes is not a keeper. Degrades to sharpness-only if the model can't be fetched
 - **Cull to target**: Say how many keepers you want ("the best 400 of these 3,000") instead of guessing at a sharpness threshold. The quota is spread across bursts, so a sharp stretch of the day cannot swallow the whole selection and leave other moments unrepresented
 - **XMP sidecar export**: Writes star ratings and colour labels to `.xmp` files beside each image, so Lightroom Classic, Capture One, Photo Mechanic and Bridge open the folder with your picks already applied. Existing sidecars are *merged*, never overwritten — another tool's develop settings, keywords and crops survive. Originals are never modified
 - **Metadata overlays**: Camera, lens, ISO, aperture, shutter speed displayed on hover
@@ -212,9 +213,11 @@ What that covers today:
 | `xmp_sidecar.py` | Ratings 0-5 and -1 round-trip; all five Lightroom labels; clamping; **merge preserves another tool's `crs:` develop settings, `dc:title` and keywords**; a corrupt sidecar degrades instead of raising; batch write over a real cull |
 | `cull_to_target` | Quota spread evenly across bursts, picks each burst's sharpest first; clamps above the image count; rejects a negative target |
 | `create_shortcut.py` | Writes a `.lnk` whose argument is quoted, targets `pythonw.exe`, and launches successfully from a path containing a space |
+| `face_analysis.py` | Model download checksum-pinned and verified; detects two real faces and **no false positives** across six non-face sample images; stable from 0.4x to 2x scale; grayscale, RGBA, empty and `None` inputs; landmarks mapped back to full-resolution coordinates after downscaling; **degrades to unavailable rather than raising when the model is absent** |
+| blink-aware culling | With eye checking off, the sharpest frame wins even with closed eyes; with it on, the same burst picks the softer open-eyed frame instead — verified on bursts built so sharpness and open eyes disagree |
 | `video/` | Every timing, spatial, structure, audio, and colour operation; all 4 export presets; `.cube` LUT; multi-step `JobManager` pipelines including the failure path |
 | `video/api.py` | `/probe`, `/jobs`, `/jobs/{id}`, `/concat`, `/transition`, plus 400/404 handling |
-| `ui/main_window.py` | Window construction, folder load, video load, all ten video operations chained through their real handlers, plus **Select Top N** and **Write XMP Sidecars** driven through their real handlers |
+| `ui/main_window.py` | Window construction, folder load, video load, all ten video operations chained through their real handlers, plus **Select Top N**, **Skip blinks** and **Write XMP Sidecars** driven through their real handlers |
 
 Contributions that add a proper `pytest` suite are very welcome — see
 [Contributing](#contributing).
@@ -321,8 +324,8 @@ nothing here reads as a promise the code does not keep.
 | Duplicate & burst sequence detection | **Done** — perceptual hash + capture-time grouping |
 | Cull to a target count | **Done** — quota spread across bursts |
 | Star ratings & colour labels to `.xmp` sidecars | **Done** — merges, never clobbers |
-| Closed-eye / blink detection | **Not built.** Needs a face-landmark model. OpenCV 5 in this environment ships no Haar cascades, but it does expose the YuNet DNN detector, so this is the next tractable step |
-| Identifying the same person across a shoot | **Not built.** Needs face-recognition embeddings (e.g. SFace) |
+| Closed-eye / blink detection | **Done** — YuNet detection + per-eye openness scoring, wired into burst ranking. Heuristic, not a trained classifier (see below) |
+| Identifying the same person across a shoot | **Not built.** Face *detection* now exists, but telling one person from another needs recognition embeddings (e.g. SFace) on top |
 | Loupe / Survey / spray-can review UI | **Not built.** Review today is the Library grid plus the cull report |
 
 ### Editing & retouching
@@ -332,7 +335,7 @@ nothing here reads as a promise the code does not keep.
 | Manual RAW adjustment sliders | **Done** — exposure/contrast/saturation, white balance, 6 film grades |
 | Subject / background masking | **Partial** — background removal produces a subject mask; it is not yet exposed as an editable mask |
 | Background replacement | **Partial** — cutout exists, compositing a new background does not |
-| Skin smoothing, blemish & wrinkle reduction | **Not built.** Feasible with classical frequency-separation retouching once face detection lands |
+| Skin smoothing, blemish & wrinkle reduction | **Not built.** Face detection has now landed, so classical frequency-separation retouching targeted at the face box is the next tractable step here |
 | Teeth whitening, glare removal, stray-hair removal, clothing de-wrinkling | **Not built.** Each needs its own trained segmentation model |
 | AI profiles trained from a photographer's Lightroom catalogue | **Not built.** This is a training pipeline and a model architecture, not a feature flag — the single largest item in the spec |
 | Marketplace of pre-built styles | **Not built.** Needs server infrastructure and curated content |
@@ -352,11 +355,49 @@ nothing here reads as a promise the code does not keep.
 - [ ] Direct Instagram upload (currently exports, you upload)
 - [ ] Keyboard shortcuts for rapid culling
 
+### How blink detection actually works, and what it is not
+
+YuNet returns five landmarks per face, two of which are eye *centres*. It
+gives no eye contour, so the standard Eye Aspect Ratio — which needs six
+points per eye — cannot be computed from it. Instead a patch is cropped
+around each eye centre and the **vertical extent of the dark region** inside
+it is measured: an open eye shows the iris as a tall dark blob, a closed lid
+shows only a thin horizontal lash line.
+
+This is a **heuristic, not a trained classifier.** Be aware of what that
+means in practice:
+
+- The decision threshold (`EYE_OPEN_THRESHOLD`, 0.42) was placed using two
+  real faces with open eyes and synthetically closed versions of them. Open
+  eyes measured 0.52-0.78 and closed 0.15-0.23, so the gap is wide — but
+  two faces is **not** a validated dataset.
+- Sunglasses, heavy shadow, strong side-lighting, motion blur across the eye,
+  and faces turned far from camera have not been tested at all.
+- `eyes_closed` deliberately requires **both** eyes below threshold. One eye
+  alone is far more often a highlight, a stray hair or a head turn than a
+  real blink, and flagging those would make a cull noisy.
+- Every frame also exposes a raw `min_eye_openness` score, so you can judge
+  borderline frames yourself rather than trusting the boolean.
+
+Treat it as a strong first pass worth reviewing, not an oracle. If it
+mis-reads your images, `EYE_OPEN_THRESHOLD` is the one number to tune.
+
 ### A note on the performance target
 
-The spec asks for 1,000 RAW files culled in under five minutes. That has
-**not** been benchmarked on real RAW files yet — the culling tests run on
-generated JPEGs. Treat it as an untested goal rather than a measured result.
+The spec asks for 1,000 RAW files culled in under five minutes. Measured so
+far, on this hardware:
+
+| Workload | Per frame | Extrapolated to 1,000 |
+| --- | --- | --- |
+| Blink detection, 512px JPEG | ~19 ms | ~0.3 min |
+| Blink detection, 36MP JPEG | ~341 ms | **~5.7 min** |
+
+So with blink detection enabled on full-resolution files the target is
+**not** met — and these numbers are from JPEGs, whereas RAW decoding is
+slower still. The cost is dominated by decoding the file, not by the
+detector. Culling without `check_eyes` is far quicker. This has still never
+been benchmarked on genuine camera RAW files, so treat the RAW case as
+unmeasured.
 
 ## Contributing
 

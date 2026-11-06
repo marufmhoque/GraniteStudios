@@ -41,6 +41,11 @@ class CullResult:
     phash: int | None = None
     is_starred: bool = False
     is_duplicate: bool = False
+    # Populated only when a cull runs with eye checking enabled.
+    face_count: int = 0
+    eyes_closed: bool = False
+    min_eye_openness: float | None = None
+    eyes_checked: bool = False
 
 
 @dataclass
@@ -208,12 +213,48 @@ class SmartCull:
         paths = self.loader.scan_folder(folder)
         return self.group_bursts(list(paths), time_threshold=time_threshold)
 
+    def check_eyes(
+        self,
+        frames: "list[CullResult]",
+        analyzer=None,
+        progress: Callable[[int, int], None] | None = None,
+    ) -> bool:
+        """Annotate frames with face count and closed-eye state.
+
+        Returns False and leaves frames untouched when the face model is
+        unavailable, so a cull still works on a machine that could not
+        fetch it — the same graceful-degradation rule the rest of the app
+        follows.
+        """
+        if analyzer is None:
+            from src.ai_tools.face_analysis import FaceAnalyzer
+
+            analyzer = FaceAnalyzer()
+        if not analyzer.available:
+            logger.info("Face model unavailable — skipping eye checks.")
+            return False
+
+        total = len(frames)
+        for i, frame in enumerate(frames, start=1):
+            report = analyzer.analyze_path(frame.path)
+            frame.eyes_checked = True
+            frame.face_count = report.face_count
+            frame.eyes_closed = report.any_eyes_closed
+            openness = [
+                f.min_openness for f in report.faces if f.min_openness is not None
+            ]
+            frame.min_eye_openness = min(openness) if openness else None
+            if progress:
+                progress(i, total)
+        return True
+
     def cull_to_target(
         self,
         folder: str | Path,
         target_count: int,
         time_threshold: float = 2.0,
         progress: Callable[[int, int], None] | None = None,
+        check_eyes: bool = False,
     ) -> list[CullResult]:
         """Select roughly ``target_count`` keepers from a whole folder.
 
@@ -237,11 +278,22 @@ class SmartCull:
 
         groups = self.cull_folder(folder, time_threshold=time_threshold)
 
+        if check_eyes:
+            # Annotate before ranking, so a blink can demote a frame that
+            # would otherwise win its burst on sharpness alone.
+            self.check_eyes([f for g in groups for f in g.frames], progress=progress)
+
         # Sharpest-first inside every burst, so round-robin passes take each
-        # burst's best remaining frame.
+        # burst's best remaining frame. With eye checking on, an open-eyed
+        # frame outranks a sharper one where everybody blinked — a crisp
+        # photo of closed eyes is not a keeper.
         ranked: list[list[CullResult]] = []
         for group in groups:
-            frames = sorted(group.frames, key=lambda f: f.sharpness, reverse=True)
+            frames = sorted(
+                group.frames,
+                key=lambda f: (not f.eyes_closed, f.sharpness),
+                reverse=True,
+            )
             for frame in frames:
                 frame.is_starred = False
                 frame.is_duplicate = False
@@ -277,7 +329,7 @@ class SmartCull:
             if not frame.is_starred:
                 frame.is_duplicate = True
 
-        all_frames.sort(key=lambda f: (not f.is_starred, -f.sharpness))
+        all_frames.sort(key=lambda f: (not f.is_starred, f.eyes_closed, -f.sharpness))
         return all_frames
 
     # ------------------------------------------------------------------ #
