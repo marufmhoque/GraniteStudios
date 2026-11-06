@@ -26,10 +26,17 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreferen
 set EXITCODE=%ERRORLEVEL%
 if %EXITCODE% NEQ 0 (
   echo.
-  echo   Install did not finish. The message above explains why.
+  echo   Install did not finish.
+  echo.
+  echo   A log was saved to:
+  echo       %TEMP%\GraniteStudios-install.log
+  echo.
+  echo   This window stays open so you can read the error above.
+  echo   Send that log file along if you want help with it.
 )
 echo.
-pause
+echo   Press any key to close...
+pause >nul
 exit /b %EXITCODE%
 
 :PS_PAYLOAD_BEGIN
@@ -56,8 +63,30 @@ try {
         [Net.SecurityProtocolType]::Tls12 -bor [Net.ServicePointManager]::SecurityProtocol
 } catch { }
 
+$logPath = Join-Path $env:TEMP 'GraniteStudios-install.log'
+# The download and extract stages run before install.ps1 exists locally, so
+# they need their own log; install.ps1 then appends to the same file.
+try {
+    "=== Granite Studios bootstrap $(Get-Date -Format s) ===" |
+        Out-File -FilePath $logPath -Encoding utf8 -Force
+} catch { }
+function LogLine ($m) { try { $m | Out-File -FilePath $logPath -Encoding utf8 -Append } catch { } }
+
+function BootstrapFail ($message, $detail) {
+    Fail $message
+    if ($detail) { Say "Details: $detail" }
+    LogLine "FAILED: $message"
+    if ($detail) { LogLine "Details: $detail" }
+    Write-Host ''
+    Say 'A log was saved to:'
+    Write-Host "      $logPath" -ForegroundColor Cyan
+    try { Start-Process notepad.exe -ArgumentList $logPath -ErrorAction SilentlyContinue } catch { }
+    exit 1
+}
+
 $work = Join-Path $env:TEMP ("GraniteStudios-setup-" + [guid]::NewGuid().ToString('N').Substring(0,8))
 New-Item -ItemType Directory -Path $work -Force | Out-Null
+LogLine "work dir: $work"
 
 try {
     $zip = Join-Path $work 'source.zip'
@@ -67,18 +96,14 @@ try {
     try {
         Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing -TimeoutSec 300
     } catch {
-        Fail "Could not download Granite Studios."
-        Say  "Check your internet connection, then run this file again."
-        Say  "(If you are on a restricted network, the GitHub download may be blocked.)"
-        Say  ""
-        Say  "Details: $($_.Exception.Message)"
-        exit 1
+        Say 'Check your internet connection, then run this file again.'
+        Say '(On a restricted network the GitHub download may be blocked.)'
+        BootstrapFail 'Could not download Granite Studios.' $_.Exception.Message
     }
 
     $size = (Get-Item $zip).Length
     if ($size -lt 50000) {
-        Fail "The download looks incomplete ($size bytes). Try again."
-        exit 1
+        BootstrapFail "The download looks incomplete ($size bytes) - please try again." $null
     }
     Ok "Downloaded ($([math]::Round($size/1MB,1)) MB)."
 
@@ -92,8 +117,7 @@ try {
             [IO.Compression.ZipFile]::ExtractToDirectory($zip, $work)
         }
     } catch {
-        Fail "Could not extract the download: $($_.Exception.Message)"
-        exit 1
+        BootstrapFail 'Could not extract the download.' $_.Exception.Message
     }
 
     # GitHub zips put everything under <repo>-<branch>/.
@@ -101,15 +125,38 @@ try {
             Where-Object { Test-Path (Join-Path $_.FullName 'install\install.ps1') } |
             Select-Object -First 1
     if (-not $root) {
-        Fail 'The download did not contain the installer. The repository layout may have changed.'
-        exit 1
+        BootstrapFail 'The download did not contain the installer (the repository layout may have changed).' $null
     }
     Ok 'Extracted.'
     Write-Host ''
 
     # Hand off to the real installer, pointed at what we just downloaded.
     $installer = Join-Path $root.FullName 'install\install.ps1'
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer -SourceDir $root.FullName
+
+    # Pass only the parameters that downloaded copy actually declares. This
+    # file is distributed standalone and updates independently of the repo,
+    # so it can easily be newer than the install.ps1 it fetches -- and
+    # passing an unknown parameter to a script with [CmdletBinding()] is a
+    # hard failure ("a parameter cannot be found that matches..."), which
+    # would break the installer for everyone until the two caught up.
+    $declared = @()
+    try {
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+                   $installer, [ref]$null, [ref]$null)
+        if ($ast -and $ast.ParamBlock) {
+            $declared = @($ast.ParamBlock.Parameters |
+                          ForEach-Object { $_.Name.VariablePath.UserPath })
+        }
+    } catch {
+        LogLine "Could not inspect installer parameters: $($_.Exception.Message)"
+    }
+    LogLine "installer accepts: $($declared -join ', ')"
+
+    $argv = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $installer)
+    if ($declared -contains 'SourceDir') { $argv += @('-SourceDir', $root.FullName) }
+    if ($declared -contains 'LogPath')   { $argv += @('-LogPath',   $logPath) }
+
+    & powershell.exe @argv
     $code = $LASTEXITCODE
     if ($code -ne 0) { exit $code }
 }

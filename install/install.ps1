@@ -14,7 +14,8 @@
 
 [CmdletBinding()]
 param(
-    [string] $SourceDir
+    [string] $SourceDir,
+    [string] $LogPath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -29,6 +30,54 @@ function Say   ($m) { Write-Host "  $m" }
 function Ok    ($m) { Write-Host "  [ok] $m"   -ForegroundColor Green }
 function Warn  ($m) { Write-Host "  [!]  $m"   -ForegroundColor Yellow }
 function Fail  ($m) { Write-Host "  [x]  $m"   -ForegroundColor Red }
+
+# --- Logging ------------------------------------------------------------ #
+# Everything the installer prints, including pip's output and any error, is
+# written to a log file. A console window that closes, scrolls past the
+# error, or gets dismissed must not take the only copy of the diagnosis with
+# it -- on failure the log path is shown and the file is opened.
+if (-not $LogPath) {
+    $LogPath = Join-Path $env:TEMP 'GraniteStudios-install.log'
+}
+$script:Transcribing = $false
+try {
+    # Append, so lines the bootstrap already wrote are not truncated away.
+    Start-Transcript -Path $LogPath -Append | Out-Null
+    $script:Transcribing = $true
+} catch {
+    # Logging is a convenience; never let it stop the install.
+    Write-Host "  [!]  Could not open a log file at $LogPath" -ForegroundColor Yellow
+}
+
+function Stop-Logging {
+    if ($script:Transcribing) {
+        try { Stop-Transcript | Out-Null } catch { }
+        $script:Transcribing = $false
+    }
+}
+
+function Abort ($message) {
+    ""
+    Fail $message
+    ""
+    Say  "A full log was saved to:"
+    Write-Host "      $LogPath" -ForegroundColor Cyan
+    Say  "Send that file along if you want help working out what happened."
+    Stop-Logging
+    # Open the log so the error is in front of the user even if this window
+    # disappears.
+    try { Start-Process notepad.exe -ArgumentList $LogPath -ErrorAction SilentlyContinue } catch { }
+    exit 1
+}
+
+# Catches any terminating error anywhere below, so an unexpected failure is
+# reported with its location instead of a bare stack trace.
+trap {
+    ""
+    Fail "Unexpected error: $($_.Exception.Message)"
+    if ($_.InvocationInfo) { Say "At: $($_.InvocationInfo.PositionMessage.Trim())" }
+    Abort 'The installer stopped before finishing.'
+}
 
 Write-Host ''
 Write-Host "  $AppName installer" -ForegroundColor Cyan
@@ -139,8 +188,7 @@ if (-not $python) {
     Write-Host ''
     Write-Host '  On the first screen of the Python installer, tick'
     Write-Host '  "Add python.exe to PATH" before clicking Install.'
-    Write-Host ''
-    exit 1
+    Abort 'Python 3.10 or newer is required.'
 }
 Ok "Python $($python.Version) at $($python.Path)"
 
@@ -148,8 +196,28 @@ Ok "Python $($python.Version) at $($python.Path)"
 $required = @('main.py','requirements.txt','src')
 foreach ($item in $required) {
     if (-not (Test-Path (Join-Path $SourceDir $item))) {
-        Fail "Source looks incomplete - '$item' is missing from $SourceDir"
-        exit 1
+        Abort "Source looks incomplete - '$item' is missing from $SourceDir"
+    }
+}
+
+# A running copy holds its files open, so replacing them fails with a
+# confusing "being used by another process" error. Check first and say so.
+if (Test-Path $InstallDir) {
+    $running = @()
+    foreach ($name in @('pythonw', 'python')) {
+        foreach ($proc in (Get-Process $name -ErrorAction SilentlyContinue)) {
+            $exePath = $null
+            try { $exePath = $proc.Path } catch { }
+            if ($exePath -and $exePath.StartsWith($InstallDir, 'OrdinalIgnoreCase')) {
+                $running += $proc
+            }
+        }
+    }
+    if ($running.Count -gt 0) {
+        Write-Host ''
+        Say "Granite Studios is currently running (process id $($running[0].Id))."
+        Say 'Close the Granite Studios window, then run this installer again.'
+        Abort 'Cannot replace files while the app is open.'
     }
 }
 
@@ -181,7 +249,7 @@ Ok 'Application files copied.'
 if (-not (Test-Path (Join-Path $VenvDir 'Scripts\python.exe'))) {
     Say 'Creating a private Python environment (this keeps your system Python clean)...'
     & $python.Path -m venv $VenvDir
-    if ($LASTEXITCODE -ne 0) { Fail 'Could not create the virtual environment.'; exit 1 }
+    if ($LASTEXITCODE -ne 0) { Abort 'Could not create the private Python environment.' }
     Ok 'Environment created.'
 } else {
     Ok 'Reusing the existing environment.'
@@ -197,9 +265,10 @@ Write-Host ''
 & $VenvPy -m pip install -r (Join-Path $InstallDir 'requirements.txt') --disable-pip-version-check
 if ($LASTEXITCODE -ne 0) {
     Write-Host ''
-    Fail 'Dependency installation failed - see the pip output above.'
-    Say 'The most common cause is no internet connection.'
-    exit 1
+    Say 'Dependency installation failed. The pip output above says why; the'
+    Say 'usual causes are a dropped internet connection or a package that'
+    Say 'has no prebuilt wheel for this Python version.'
+    Abort 'Could not install the required libraries.'
 }
 Write-Host ''
 Ok 'Dependencies installed.'
@@ -316,5 +385,7 @@ Write-Host ''
 Say "Launch it from the Desktop shortcut or the Start Menu."
 Say "Installed to: $InstallDir"
 Say "To remove it: Settings > Apps > $AppName (or run Uninstall Granite Studios.bat there)."
+Say "Install log: $LogPath"
 Write-Host ''
+Stop-Logging
 exit 0

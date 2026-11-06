@@ -63,6 +63,26 @@ folders are never touched.
 > when sync pauses, are slow to read, and break `pip`. Installing to a local
 > directory makes launching deterministic.
 
+### If the install fails
+
+Every run writes a full log, including pip's output and any error:
+
+```
+%TEMP%\GraniteStudios-install.log
+```
+
+On failure the installer prints that path, opens the file in Notepad, and
+holds the window open, so the error cannot scroll away or vanish when the
+window closes. Send that log if you want help reading it.
+
+Two things it checks for and reports in plain language:
+
+- **Granite Studios is already running.** A running copy holds its own files
+  open, so replacing them fails. Close the app's window and run the installer
+  again.
+- **No Python 3.10+.** It links to the download rather than failing
+  cryptically. Tick *Add python.exe to PATH* in the Python installer.
+
 See [README_INSTALL.md](README_INSTALL.md) for SmartScreen notes.
 
 ### macOS

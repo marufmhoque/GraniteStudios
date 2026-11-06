@@ -88,6 +88,37 @@ jobs:
           }
           if ($fail) { exit 1 }
 
+      - name: Bootstrap tolerates an older installer
+        shell: pwsh
+        run: |
+          # The bootstrap ships standalone and updates independently of the
+          # repo, so it can be newer than the install.ps1 it downloads.
+          # Passing an undeclared parameter to a [CmdletBinding()] script is
+          # a hard failure, so the bootstrap must feature-detect instead of
+          # passing blindly. This guards that it still does.
+          $bat = Get-Content 'install/Install-GraniteStudios.bat' -Raw
+          $fail = $false
+          if ($bat -notmatch 'ParamBlock') {
+            Write-Host '::error file=install/Install-GraniteStudios.bat::no parameter feature-detection; a newer bootstrap would break against an older install.ps1'
+            $fail = $true
+          } else {
+            Write-Host 'ok: bootstrap inspects the installer parameter block'
+          }
+          # Anything it passes conditionally must still exist today, or the
+          # feature would silently stop being used.
+          $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+                     (Resolve-Path 'install/install.ps1'), [ref]$null, [ref]$null)
+          $declared = @($ast.ParamBlock.Parameters |
+                        ForEach-Object { $_.Name.VariablePath.UserPath })
+          Write-Host "install.ps1 declares: $($declared -join ', ')"
+          foreach ($needed in @('SourceDir', 'LogPath')) {
+            if ($declared -notcontains $needed) {
+              Write-Host "::error file=install/install.ps1::-$needed is referenced by the bootstrap but no longer declared"
+              $fail = $true
+            }
+          }
+          if ($fail) { exit 1 }
+
       - name: Application code compiles
         shell: pwsh
         run: |
