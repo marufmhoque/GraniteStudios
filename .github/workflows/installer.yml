@@ -119,6 +119,25 @@ jobs:
           }
           if ($fail) { exit 1 }
 
+      - name: No native stderr captured with 2>&1
+        shell: pwsh
+        run: |
+          # Windows PowerShell 5.1 turns a native command's stderr into a
+          # TERMINATING error when $ErrorActionPreference is 'Stop'. Capturing
+          # a native command with `2>&1` therefore aborts the installer on a
+          # mere warning -- a Qt font warning once failed an install that had
+          # already fully succeeded. Native calls must redirect to a file with
+          # the preference relaxed instead.
+          $hits = Select-String -Path 'install/install.ps1' -Pattern '2>&1' |
+                  Where-Object { $_.Line -notmatch '^\s*#' }
+          if ($hits) {
+            foreach ($h in $hits) {
+              Write-Host "::error file=install/install.ps1,line=$($h.LineNumber)::native stderr captured with 2>&1; use *> to a file with ErrorActionPreference relaxed"
+            }
+            exit 1
+          }
+          Write-Host 'ok: no 2>&1 capture of native commands'
+
       - name: Application code compiles
         shell: pwsh
         run: |

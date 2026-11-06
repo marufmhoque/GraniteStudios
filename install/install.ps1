@@ -58,21 +58,33 @@ function Stop-Logging {
 }
 
 function Abort ($message) {
+    # Keep the console short. An earlier version dumped 80 lines of pip log
+    # here, which pushed the actual error off the top of the window -- the
+    # exact problem the logging was added to solve. Detail goes to the file;
+    # the screen gets the error, and gets it last.
     ""
     Fail $message
     ""
-    # Fold pip's log into the transcript so one file holds the whole story.
-    if (Test-Path -LiteralPath $PipLog) {
-        try {
-            Write-Host '  --- pip log ---'
-            Get-Content -LiteralPath $PipLog -Tail 80 | ForEach-Object { Write-Host "  $_" }
-            Write-Host '  --- end pip log ---'
-        } catch { }
-    }
     Say  "A full log was saved to:"
     Write-Host "      $LogPath" -ForegroundColor Cyan
+    if (Test-Path -LiteralPath $PipLog) {
+        Say "Dependency detail:"
+        Write-Host "      $PipLog" -ForegroundColor Cyan
+    }
     Say  "Send that file along if you want help working out what happened."
+    ""
+    # Repeated so it is the last thing on screen, whatever scrolled past.
+    Fail $message
+
     Stop-Logging
+    # Append pip's log to the saved file (not the console) so one file holds
+    # the whole story. Done after Stop-Transcript to avoid interleaving.
+    if (Test-Path -LiteralPath $PipLog) {
+        try {
+            Add-Content -LiteralPath $LogPath -Value "`n--- pip log ---"
+            Get-Content -LiteralPath $PipLog | Add-Content -LiteralPath $LogPath
+        } catch { }
+    }
     # Open the log so the error is in front of the user even if this window
     # disappears.
     try { Start-Process notepad.exe -ArgumentList $LogPath -ErrorAction SilentlyContinue } catch { }
@@ -370,8 +382,18 @@ try {
 }
 
 # ------------------------------------------------------------- Smoke test ---
+# This check must never be able to fail the install. Everything above has
+# already succeeded by this point, so a problem here is information, not a
+# reason to tell someone their working install is broken.
+#
+# Qt writes harmless warnings to stderr ("QFontDatabase: Cannot find font
+# directory ..."), and under $ErrorActionPreference = 'Stop' PowerShell 5.1
+# turns a native command's stderr into a *terminating* error. Capturing with
+# `2>&1` therefore aborted the installer on a warning. Streams go to a file
+# instead, with the preference relaxed for the duration.
 Say 'Verifying the install can actually start...'
-$check = & $VenvPy -c @"
+$StartupLog = Join-Path $env:TEMP 'GraniteStudios-startup-check.log'
+$checkCode = @"
 import os, sys
 os.environ['QT_QPA_PLATFORM'] = 'offscreen'
 sys.path.insert(0, r'$InstallDir')
@@ -381,15 +403,27 @@ from src.ui.main_window import MainWindow
 w = MainWindow()
 assert w.windowTitle(), 'no window title'
 print('STARTUP_OK')
-"@ 2>&1
+"@
+$prevEA = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+try {
+    & $VenvPy -c $checkCode *> $StartupLog
+} catch {
+    # Deliberately swallowed: see the note above.
+    "startup check raised: $($_.Exception.Message)" | Out-File $StartupLog -Append
+}
+$ErrorActionPreference = $prevEA
+$check = if (Test-Path -LiteralPath $StartupLog) { Get-Content -LiteralPath $StartupLog -Raw } else { '' }
 if ("$check" -match 'STARTUP_OK') {
     Ok 'Verified - the app builds its window successfully.'
 } else {
     Write-Host ''
-    Warn 'The app did not pass its startup check. Details:'
+    Warn 'The app did not print its startup marker. Details:'
     Write-Host "$check"
     Write-Host ''
-    Warn 'The shortcuts were still created; try launching and report what you see.'
+    Say  'This check is informational - the install itself completed, and the'
+    Say  'shortcuts were created. Try launching the app; if it does not open,'
+    Say  "send along $LogPath."
 }
 
 Write-Host ''
