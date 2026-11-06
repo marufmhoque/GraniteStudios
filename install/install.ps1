@@ -39,6 +39,7 @@ function Fail  ($m) { Write-Host "  [x]  $m"   -ForegroundColor Red }
 if (-not $LogPath) {
     $LogPath = Join-Path $env:TEMP 'GraniteStudios-install.log'
 }
+$PipLog = Join-Path $env:TEMP 'GraniteStudios-pip.log'
 $script:Transcribing = $false
 try {
     # Append, so lines the bootstrap already wrote are not truncated away.
@@ -60,6 +61,14 @@ function Abort ($message) {
     ""
     Fail $message
     ""
+    # Fold pip's log into the transcript so one file holds the whole story.
+    if (Test-Path -LiteralPath $PipLog) {
+        try {
+            Write-Host '  --- pip log ---'
+            Get-Content -LiteralPath $PipLog -Tail 80 | ForEach-Object { Write-Host "  $_" }
+            Write-Host '  --- end pip log ---'
+        } catch { }
+    }
     Say  "A full log was saved to:"
     Write-Host "      $LogPath" -ForegroundColor Cyan
     Say  "Send that file along if you want help working out what happened."
@@ -261,8 +270,12 @@ $VenvPyW = Join-Path $VenvDir 'Scripts\pythonw.exe'
 Say 'Installing dependencies - this takes a few minutes the first time.'
 Say 'It downloads image/video libraries (OpenCV, rawpy, FFmpeg, the AI model runtime).'
 Write-Host ''
-& $VenvPy -m pip install --upgrade pip --quiet --disable-pip-version-check
-& $VenvPy -m pip install -r (Join-Path $InstallDir 'requirements.txt') --disable-pip-version-check
+# pip writes its own verbose log. Start-Transcript does not reliably capture
+# output from a native command, and pip is by far the likeliest step to fail,
+# so relying on the transcript alone would lose exactly the detail that
+# matters. Abort folds this file into the main log.
+& $VenvPy -m pip install --upgrade pip --quiet --disable-pip-version-check --log $PipLog
+& $VenvPy -m pip install -r (Join-Path $InstallDir 'requirements.txt') --disable-pip-version-check --log $PipLog
 if ($LASTEXITCODE -ne 0) {
     Write-Host ''
     Say 'Dependency installation failed. The pip output above says why; the'

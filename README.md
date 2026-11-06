@@ -68,7 +68,8 @@ folders are never touched.
 Every run writes a full log, including pip's output and any error:
 
 ```
-%TEMP%\GraniteStudios-install.log
+%TEMP%\GraniteStudios-install.log   <- what the installer did
+%TEMP%\GraniteStudios-pip.log       <- full dependency install detail
 ```
 
 On failure the installer prints that path, opens the file in Notepad, and
