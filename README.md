@@ -11,10 +11,29 @@
 
 ## Quick Start
 
-### Windows
-1. Download the latest `GraniteStudios.exe` from [Releases](https://github.com/marufmhoque/GraniteStudios/releases)
-2. Run it — a Desktop shortcut is created automatically on first launch
-3. See [README_INSTALL.md](README_INSTALL.md) for SmartScreen bypass steps
+### Windows (recommended)
+
+1. Download or clone this repository.
+2. Open the `install` folder and double-click **`Install Granite Studios.bat`**.
+3. Launch it from the Desktop shortcut or the Start Menu.
+
+The installer copies the app to `%LOCALAPPDATA%\Granite Studios`, builds it a
+private Python environment so it cannot disturb any other Python on the
+machine, pre-downloads the background-removal model, registers the app in
+**Settings > Apps**, and finishes by actually starting the app headlessly to
+confirm the install works rather than just assuming it did.
+
+It needs Python 3.10+ installed once; if it cannot find one it says so and
+links to the download instead of failing cryptically. To remove the app, use
+**Settings > Apps > Granite Studios** — your photos, videos and `-edit`
+folders are never touched.
+
+> **Why an installer rather than running it in place:** a checkout often lives
+> in a synced folder (Google Drive, OneDrive, Dropbox). Those paths disappear
+> when sync pauses, are slow to read, and break `pip`. Installing to a local
+> directory makes launching deterministic.
+
+See [README_INSTALL.md](README_INSTALL.md) for SmartScreen notes.
 
 ### macOS
 1. Download the latest `.dmg` from [Releases](https://github.com/marufmhoque/GraniteStudios/releases)
@@ -39,6 +58,8 @@ architecture and deployment steps.
 ### Library & Culling
 - **Universal loader**: One-click folder import. Embedded RAW thumbnails cached for instant preview scrolling
 - **Smart cull**: Laplacian-variance sharpness scoring + timestamp-based burst grouping. Auto-stars the top 2 sharpest of each burst
+- **Cull to target**: Say how many keepers you want ("the best 400 of these 3,000") instead of guessing at a sharpness threshold. The quota is spread across bursts, so a sharp stretch of the day cannot swallow the whole selection and leave other moments unrepresented
+- **XMP sidecar export**: Writes star ratings and colour labels to `.xmp` files beside each image, so Lightroom Classic, Capture One, Photo Mechanic and Bridge open the folder with your picks already applied. Existing sidecars are *merged*, never overwritten — another tool's develop settings, keywords and crops survive. Originals are never modified
 - **Metadata overlays**: Camera, lens, ISO, aperture, shutter speed displayed on hover
 
 ### Color & Grading
@@ -188,9 +209,12 @@ What that covers today:
 | `ig_sync.py` | Exact 1080×1350 feed and 1080×1920 story output |
 | `reel_maker.py` | 1080×1920 MP4 at the requested duration; rejects fewer than 3 or more than 7 images |
 | `publisher.py` | Category tabs, custom title, responsive masonry, images emitted |
+| `xmp_sidecar.py` | Ratings 0-5 and -1 round-trip; all five Lightroom labels; clamping; **merge preserves another tool's `crs:` develop settings, `dc:title` and keywords**; a corrupt sidecar degrades instead of raising; batch write over a real cull |
+| `cull_to_target` | Quota spread evenly across bursts, picks each burst's sharpest first; clamps above the image count; rejects a negative target |
+| `create_shortcut.py` | Writes a `.lnk` whose argument is quoted, targets `pythonw.exe`, and launches successfully from a path containing a space |
 | `video/` | Every timing, spatial, structure, audio, and colour operation; all 4 export presets; `.cube` LUT; multi-step `JobManager` pipelines including the failure path |
 | `video/api.py` | `/probe`, `/jobs`, `/jobs/{id}`, `/concat`, `/transition`, plus 400/404 handling |
-| `ui/main_window.py` | Window construction, folder load, video load, and all ten video operations chained through their real handlers |
+| `ui/main_window.py` | Window construction, folder load, video load, all ten video operations chained through their real handlers, plus **Select Top N** and **Write XMP Sidecars** driven through their real handlers |
 
 Contributions that add a proper `pytest` suite are very welcome — see
 [Contributing](#contributing).
@@ -282,11 +306,57 @@ See [README_INSTALL.md](README_INSTALL.md) for Windows SmartScreen and macOS Gat
 
 ## Roadmap
 
+Granite Studios is being measured against a reference spec for a
+high-volume photographer workflow (AI culling, AI editing, AI retouching,
+client galleries). That spec describes a mature commercial product; this
+table is an honest account of where the app actually stands against it, so
+nothing here reads as a promise the code does not keep.
+
+### Culling
+
+| Requirement | Status |
+| --- | --- |
+| Native RAW (CR3/NEF/ARW/DNG), JPEG, TIFF with no pre-conversion | **Done** |
+| Focus / blur quality scoring | **Done** — Laplacian variance |
+| Duplicate & burst sequence detection | **Done** — perceptual hash + capture-time grouping |
+| Cull to a target count | **Done** — quota spread across bursts |
+| Star ratings & colour labels to `.xmp` sidecars | **Done** — merges, never clobbers |
+| Closed-eye / blink detection | **Not built.** Needs a face-landmark model. OpenCV 5 in this environment ships no Haar cascades, but it does expose the YuNet DNN detector, so this is the next tractable step |
+| Identifying the same person across a shoot | **Not built.** Needs face-recognition embeddings (e.g. SFace) |
+| Loupe / Survey / spray-can review UI | **Not built.** Review today is the Library grid plus the cull report |
+
+### Editing & retouching
+
+| Requirement | Status |
+| --- | --- |
+| Manual RAW adjustment sliders | **Done** — exposure/contrast/saturation, white balance, 6 film grades |
+| Subject / background masking | **Partial** — background removal produces a subject mask; it is not yet exposed as an editable mask |
+| Background replacement | **Partial** — cutout exists, compositing a new background does not |
+| Skin smoothing, blemish & wrinkle reduction | **Not built.** Feasible with classical frequency-separation retouching once face detection lands |
+| Teeth whitening, glare removal, stray-hair removal, clothing de-wrinkling | **Not built.** Each needs its own trained segmentation model |
+| AI profiles trained from a photographer's Lightroom catalogue | **Not built.** This is a training pipeline and a model architecture, not a feature flag — the single largest item in the spec |
+| Marketplace of pre-built styles | **Not built.** Needs server infrastructure and curated content |
+
+### Client delivery
+
+| Requirement | Status |
+| --- | --- |
+| Static web gallery with category tabs | **Done** — self-hosted HTML output |
+| Client proofing, favourites, face search, print ordering, 4K downloads | **Not built.** These need a hosted backend, accounts and payments; the desktop app only generates static galleries |
+
+### Other near-term items
+
 - [ ] ONNX subject detection for selective masks (auto-star hero shots)
 - [ ] EXIF-driven smart grouping (camera + lens combo)
 - [ ] Batch watermarking
 - [ ] Direct Instagram upload (currently exports, you upload)
 - [ ] Keyboard shortcuts for rapid culling
+
+### A note on the performance target
+
+The spec asks for 1,000 RAW files culled in under five minutes. That has
+**not** been benchmarked on real RAW files yet — the culling tests run on
+generated JPEGs. Treat it as an untested goal rather than a measured result.
 
 ## Contributing
 

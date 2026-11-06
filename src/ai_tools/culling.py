@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -206,6 +207,78 @@ class SmartCull:
         """Convenience: scan a folder and return its burst groups."""
         paths = self.loader.scan_folder(folder)
         return self.group_bursts(list(paths), time_threshold=time_threshold)
+
+    def cull_to_target(
+        self,
+        folder: str | Path,
+        target_count: int,
+        time_threshold: float = 2.0,
+        progress: Callable[[int, int], None] | None = None,
+    ) -> list[CullResult]:
+        """Select roughly ``target_count`` keepers from a whole folder.
+
+        A photographer usually knows the number they want to deliver ("give
+        me the best 400 of these 3,000") rather than a sharpness threshold
+        that means nothing in the abstract. This spreads the quota across
+        bursts instead of taking a global top-N, because a global sort
+        collapses onto whichever moments happened to be sharpest and can
+        drop entire parts of the day.
+
+        Each burst contributes its sharpest frame first; if the quota is
+        larger than the number of bursts, further passes take each burst's
+        next-best frame, and so on. Everything selected comes back starred,
+        everything else marked as a duplicate, sharpest-first.
+
+        Returns every scored frame — not just the keepers — so the caller
+        can still show, and override, the ones that missed the cut.
+        """
+        if target_count < 0:
+            raise ValueError("target_count cannot be negative")
+
+        groups = self.cull_folder(folder, time_threshold=time_threshold)
+
+        # Sharpest-first inside every burst, so round-robin passes take each
+        # burst's best remaining frame.
+        ranked: list[list[CullResult]] = []
+        for group in groups:
+            frames = sorted(group.frames, key=lambda f: f.sharpness, reverse=True)
+            for frame in frames:
+                frame.is_starred = False
+                frame.is_duplicate = False
+            if frames:
+                ranked.append(frames)
+
+        all_frames = [f for frames in ranked for f in frames]
+        total = len(all_frames)
+        if total == 0:
+            return []
+
+        quota = min(target_count, total)
+        selected = 0
+        depth = 0
+        # Round-robin across bursts: pass 0 takes every burst's best frame,
+        # pass 1 their second-best, and so on until the quota is filled.
+        while selected < quota:
+            took_this_pass = False
+            for frames in ranked:
+                if selected >= quota:
+                    break
+                if depth < len(frames):
+                    frames[depth].is_starred = True
+                    selected += 1
+                    took_this_pass = True
+                    if progress:
+                        progress(selected, quota)
+            if not took_this_pass:
+                break  # every burst exhausted before the quota was met
+            depth += 1
+
+        for frame in all_frames:
+            if not frame.is_starred:
+                frame.is_duplicate = True
+
+        all_frames.sort(key=lambda f: (not f.is_starred, -f.sharpness))
+        return all_frames
 
     # ------------------------------------------------------------------ #
     # Smart grouping & top picks

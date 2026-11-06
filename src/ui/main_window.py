@@ -32,6 +32,7 @@ from PyQt6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
+    QSpinBox,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -40,6 +41,7 @@ from PyQt6.QtWidgets import (
 from src.engine.hardware import get_hardware_summary
 from src.engine.resources import resource_path
 from src.engine.universal_loader import UniversalLoader, ImageMetadata
+from src.ai_tools import xmp_sidecar
 from src.ai_tools.culling import SmartCull
 from src.ai_tools.color_engine import ColorEngine
 from src.ai_tools.background_removal import BackgroundRemover
@@ -612,6 +614,43 @@ class MainWindow(QMainWindow):
         self.cull_button.clicked.connect(self._on_run_cull)
         top.addWidget(self.cull_button)
         layout.addLayout(top)
+
+        # Cull to Target: photographers think in deliverable counts ("the best
+        # 400 of these 3,000"), not sharpness thresholds.
+        target_row = QHBoxLayout()
+        target_row.setSpacing(10)
+        target_row.addWidget(QLabel("Cull to target:"))
+        self.cull_target_input = QSpinBox()
+        self.cull_target_input.setRange(1, 100000)
+        self.cull_target_input.setValue(400)
+        self.cull_target_input.setFixedWidth(110)
+        self.cull_target_input.setToolTip(
+            "How many keepers you want. The quota is spread across bursts so "
+            "no part of the shoot gets dropped wholesale."
+        )
+        target_row.addWidget(self.cull_target_input)
+        self.cull_target_button = QPushButton("Select Top N")
+        self.cull_target_button.clicked.connect(self._on_cull_to_target)
+        target_row.addWidget(self.cull_target_button)
+
+        target_row.addSpacing(24)
+        self.xmp_button = QPushButton("Write XMP Sidecars")
+        self.xmp_button.setToolTip(
+            "Write star ratings and colour labels to .xmp files beside each "
+            "image, so Lightroom, Capture One, Photo Mechanic or Bridge open "
+            "with these picks already applied. Your originals are not modified."
+        )
+        self.xmp_button.clicked.connect(self._on_write_xmp)
+        target_row.addWidget(self.xmp_button)
+
+        self.xmp_reject_check = QCheckBox("Mark non-picks as rejected")
+        self.xmp_reject_check.setToolTip(
+            "Write rating -1 (Lightroom's reject flag) instead of leaving "
+            "non-picks unrated."
+        )
+        target_row.addWidget(self.xmp_reject_check)
+        target_row.addStretch()
+        layout.addLayout(target_row)
 
         self.cull_results = QLabel("Load a folder in Library, then run Smart Cull.")
         self.cull_results.setObjectName("PageSubtitle")
@@ -1257,6 +1296,90 @@ class MainWindow(QMainWindow):
                         )
 
         self._run_task(work, done, self.cull_button)
+
+    def _apply_cull_state_to_grid(self, frames) -> None:
+        """Mirror star / duplicate state onto the Library thumbnails."""
+        for frame in frames:
+            cell = self.cells.get(str(frame.path))
+            if cell is not None:
+                cell.set_pick_state(
+                    starred=frame.is_starred,
+                    duplicate=frame.is_duplicate,
+                    detail=f"sharpness {frame.sharpness:,.0f}",
+                )
+
+    def _on_cull_to_target(self) -> None:
+        """Select a target number of keepers across the whole folder."""
+        if not self._require_library():
+            return
+        folder = self.current_folder
+        target = self.cull_target_input.value()
+        self.cull_results.setText(
+            f"Scoring every frame and selecting the best {target:,}…"
+        )
+
+        def work():
+            return self.culler.cull_to_target(folder, target)
+
+        def done(frames):
+            self.last_cull_frames = frames
+            picks = [f for f in frames if f.is_starred]
+            lines = [
+                f"Selected {len(picks):,} of {len(frames):,} images "
+                f"(target was {target:,}).",
+                "The quota is spread across bursts, so each moment keeps its "
+                "best frames rather than the sharpest stretch taking everything.\n",
+                "★ Keepers:",
+            ]
+            for f in picks:
+                lines.append(f"  ★  {f.path.name}   sharpness {f.sharpness:,.0f}")
+            rest = [f for f in frames if not f.is_starred]
+            if rest:
+                lines.append(f"\nNot selected ({len(rest):,}):")
+                for f in rest[:200]:
+                    lines.append(f"     {f.path.name}   sharpness {f.sharpness:,.0f}")
+                if len(rest) > 200:
+                    lines.append(f"     … and {len(rest) - 200:,} more")
+            self.cull_results.setText("\n".join(lines))
+            self._apply_cull_state_to_grid(frames)
+
+        self._run_task(work, done, self.cull_target_button)
+
+    def _on_write_xmp(self) -> None:
+        """Write the current cull decisions out as XMP sidecars."""
+        frames = getattr(self, "last_cull_frames", None)
+        if not frames:
+            QMessageBox.information(
+                self,
+                "Nothing to write",
+                "Run Smart Cull or Select Top N first, so there are picks to write.",
+            )
+            return
+
+        label_rejects = self.xmp_reject_check.isChecked()
+        count = len(frames)
+
+        def work():
+            return xmp_sidecar.write_cull_results(
+                frames, stars_for_picks=2, label_rejects=label_rejects
+            )
+
+        def done(written):
+            picks = sum(1 for f in frames if f.is_starred)
+            msg = (
+                f"Wrote {written:,} XMP sidecar(s) for {count:,} image(s).\n"
+                f"{picks:,} keeper(s) rated ★★."
+            )
+            if label_rejects:
+                msg += "\nNon-picks marked as rejected."
+            self.cull_results.setText(
+                msg
+                + "\n\nOpen the folder in Lightroom, Capture One, Photo Mechanic or "
+                  "Bridge and the ratings will already be there. Your original "
+                  "files were not modified."
+            )
+
+        self._run_task(work, done, self.xmp_button)
 
     # ------------------------------------------------------------------ #
     # Color actions
