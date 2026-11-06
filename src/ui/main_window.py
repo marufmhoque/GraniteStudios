@@ -22,6 +22,7 @@ from PyQt6.QtWidgets import (
     QFileDialog,
     QFrame,
     QGraphicsDropShadowEffect,
+    QDialog,
     QGraphicsOpacityEffect,
     QGridLayout,
     QHBoxLayout,
@@ -219,6 +220,13 @@ class TaskWorker(QThread):
 # ---------------------------------------------------------------------- #
 
 
+def _dim_effect(widget) -> QGraphicsOpacityEffect:
+    """A reusable 'this frame is out' dimming effect."""
+    effect = QGraphicsOpacityEffect(widget)
+    effect.setOpacity(0.35)
+    return effect
+
+
 class ThumbnailCell(QLabel):
     """One selectable thumbnail in the grid."""
 
@@ -229,6 +237,10 @@ class ThumbnailCell(QLabel):
         super().__init__(parent)
         self.path = path
         self.selected = False
+        self.rejected = False
+        # Remembered so the view filter can show just picks or duplicates.
+        self.starred = False
+        self.duplicate = False
         self.metadata: ImageMetadata | None = None
         self.label_text = ""
         self._badge = ""
@@ -272,6 +284,17 @@ class ThumbnailCell(QLabel):
         )
         self.web_checkbox.toggled.connect(lambda checked: self.web_toggled.emit(self.path, checked))
 
+        # Centre: rejection marker. Deliberately loud, because rejecting is
+        # the one action a photographer needs to be certain about at a glance.
+        self.reject_tag = QLabel("REJECTED", self)
+        self.reject_tag.setGeometry(6, h // 2 - 16, w - 12, 30)
+        self.reject_tag.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.reject_tag.setStyleSheet(
+            "background: rgba(227,27,35,0.92); color: white; border-radius: 6px;"
+            " padding: 4px; font-size: 13px; font-weight: 800; letter-spacing: 1px;"
+        )
+        self.reject_tag.hide()
+
         # Bottom strip: EXIF tech info (camera | lens + exposure). Narrowed
         # to leave the bottom-left corner clear for the web checkbox above.
         self.tech_label = QLabel(self)
@@ -284,7 +307,8 @@ class ThumbnailCell(QLabel):
         self.tech_label.hide()
 
     def _raise_overlays(self) -> None:
-        for overlay in (self.badge_label, self.label_tag, self.tech_label, self.web_checkbox):
+        for overlay in (self.badge_label, self.label_tag, self.tech_label,
+                        self.web_checkbox, self.reject_tag):
             overlay.raise_()
 
     def set_web_selected(self, checked: bool) -> None:
@@ -354,6 +378,8 @@ class ThumbnailCell(QLabel):
         self._rebuild_tooltip()
 
     def set_pick_state(self, starred: bool, duplicate: bool, detail: str = "") -> None:
+        self.starred = starred
+        self.duplicate = duplicate
         if starred:
             self.badge_label.setText("★ STARRED")
             self.badge_label.setStyleSheet(
@@ -375,6 +401,24 @@ class ThumbnailCell(QLabel):
         if detail:
             self.set_badge(detail)
 
+    def set_rejected(self, rejected: bool) -> None:
+        """Mark this frame as rejected — excluded from the edit folder.
+
+        Rejection is purely a flag on the app's side. The original file is
+        never moved or deleted; it simply stops being copied into the
+        -edit subfolder when anything is exported.
+        """
+        self.rejected = rejected
+        if rejected:
+            self.reject_tag.show()
+            self.reject_tag.raise_()
+            # Dim the frame so a rejected shot reads as "out" at a glance.
+            self.setGraphicsEffect(_dim_effect(self))
+        else:
+            self.reject_tag.hide()
+            self.setGraphicsEffect(None)
+        self._rebuild_tooltip()
+
     def mousePressEvent(self, event) -> None:  # noqa: N802 (Qt naming)
         if event.button() == Qt.MouseButton.LeftButton:
             self.clicked.emit(self.path)
@@ -388,11 +432,131 @@ class ThumbnailCell(QLabel):
         self.style().polish(self)
 
 
+class RejectsDialog(QDialog):
+    """Review rejected frames before they are excluded from the edit folder.
+
+    This window exists so rejecting is never a surprise: nothing leaves the
+    selection silently. It is explicitly *not* a delete confirmation --
+    originals are never touched -- so the wording avoids the word "delete"
+    except to say what does not happen.
+    """
+
+    def __init__(self, paths: list[str], loader, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Rejected photos")
+        self.resize(900, 620)
+        self.restored: set[str] = set()
+        self._loader = loader
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 18, 20, 18)
+        layout.setSpacing(12)
+
+        heading = QLabel(f"{len(paths)} photo(s) rejected")
+        heading.setStyleSheet("font-size: 17px; font-weight: 700; color: #f2f3f5;")
+        layout.addWidget(heading)
+
+        explain = QLabel(
+            "These will not be copied into the -edit subfolder. "
+            "Your original files are never deleted, moved or changed — "
+            "they stay exactly where they are. Untick any you want to keep."
+        )
+        explain.setWordWrap(True)
+        explain.setStyleSheet("color: #a8a8ac; font-size: 12px;")
+        layout.addWidget(explain)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        host = QWidget()
+        grid = QGridLayout(host)
+        grid.setSpacing(10)
+        grid.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+
+        self._checks: dict[str, QCheckBox] = {}
+        columns = 5
+        for index, path in enumerate(paths):
+            cell = QWidget()
+            cell_layout = QVBoxLayout(cell)
+            cell_layout.setContentsMargins(4, 4, 4, 4)
+            cell_layout.setSpacing(4)
+
+            thumb = QLabel()
+            thumb.setFixedSize(150, 150)
+            thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            thumb.setStyleSheet("background: #121318; border-radius: 6px;")
+            thumb.setText(Path(path).name)
+            thumb.setWordWrap(True)
+            try:
+                preview = loader.load_preview(path)
+                if preview is not None:
+                    image = QImage(
+                        preview.tobytes("raw", "RGB"),
+                        preview.width,
+                        preview.height,
+                        preview.width * 3,
+                        QImage.Format.Format_RGB888,
+                    )
+                    thumb.setPixmap(
+                        QPixmap.fromImage(image).scaled(
+                            150,
+                            150,
+                            Qt.AspectRatioMode.KeepAspectRatio,
+                            Qt.TransformationMode.SmoothTransformation,
+                        )
+                    )
+            except Exception:
+                # A thumbnail that will not decode must not stop the review.
+                pass
+            cell_layout.addWidget(thumb)
+
+            check = QCheckBox("Reject")
+            check.setChecked(True)
+            check.setToolTip("Untick to keep this photo in the edit folder.")
+            self._checks[path] = check
+            cell_layout.addWidget(check)
+
+            name = QLabel(Path(path).name)
+            name.setStyleSheet("color: #8b8c93; font-size: 10px;")
+            name.setWordWrap(True)
+            cell_layout.addWidget(name)
+
+            grid.addWidget(cell, index // columns, index % columns)
+
+        scroll.setWidget(host)
+        layout.addWidget(scroll, stretch=1)
+
+        buttons = QHBoxLayout()
+        keep_all = QPushButton("Keep all (undo rejection)")
+        keep_all.setObjectName("SecondaryButton")
+        keep_all.clicked.connect(self._keep_all)
+        buttons.addWidget(keep_all)
+        buttons.addStretch()
+
+        cancel = QPushButton("Cancel")
+        cancel.setObjectName("SecondaryButton")
+        cancel.clicked.connect(self.reject)
+        buttons.addWidget(cancel)
+
+        confirm = QPushButton("Confirm")
+        confirm.setObjectName("ActionButton")
+        confirm.clicked.connect(self.accept)
+        buttons.addWidget(confirm)
+        layout.addLayout(buttons)
+
+    def _keep_all(self) -> None:
+        for check in self._checks.values():
+            check.setChecked(False)
+
+    def still_rejected(self) -> set[str]:
+        """Paths the user left ticked, i.e. still rejected."""
+        return {path for path, check in self._checks.items() if check.isChecked()}
+
+
 # ---------------------------------------------------------------------- #
 # Main window
 # ---------------------------------------------------------------------- #
 
-NAV_ITEMS = ["Library", "AI Cull", "Color / Filters", "Reel Maker", "Web Export", "Video Editor"]
+NAV_ITEMS = ["Photos", "Reel Maker", "Web Export", "Video Editor"]
 
 
 class MainWindow(QMainWindow):
@@ -422,6 +586,9 @@ class MainWindow(QMainWindow):
         self.edit_folder: Path | None = None
         self.image_paths: list[Path] = []
         self.selected: set[str] = set()
+        # Rejected == excluded from the -edit subfolder. Never a file delete.
+        self.rejected: set[str] = set()
+        self.last_cull_frames: list = []
         self.web_selected: set[str] = set()
         self.cells: dict[str, ThumbnailCell] = {}
         self.metadata: dict[str, ImageMetadata] = {}
@@ -457,9 +624,7 @@ class MainWindow(QMainWindow):
         root_layout.addWidget(self._build_sidebar())
 
         self.pages = QStackedWidget()
-        self.pages.addWidget(self._build_library_page())
-        self.pages.addWidget(self._build_cull_page())
-        self.pages.addWidget(self._build_color_page())
+        self.pages.addWidget(self._build_photos_page())
         self.pages.addWidget(self._build_reel_page())
         self.pages.addWidget(self._build_web_page())
         self.pages.addWidget(self._build_video_page())
@@ -533,14 +698,24 @@ class MainWindow(QMainWindow):
 
     # --- Library -------------------------------------------------------- #
 
-    def _build_library_page(self) -> QWidget:
+    def _build_photos_page(self) -> QWidget:
+        """The single working pane: import, cull, reject, grade.
+
+        These were three separate tabs (Library / AI Cull / Color-Filters),
+        which forced the grid out of sight exactly when you needed to see
+        what an action had done. Culling without seeing the frames, or
+        grading a selection you cannot look at, is not a workflow. One grid
+        stays on screen and every tool acts on it.
+        """
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(28, 24, 28, 24)
-        layout.setSpacing(16)
+        layout.setContentsMargins(24, 20, 24, 18)
+        layout.setSpacing(10)
 
         top = QHBoxLayout()
-        top.addLayout(self._page_header("Library", "Universal import: RAW, HEIC, JPEG, PNG"))
+        top.addLayout(
+            self._page_header("Photos", "Import, cull, reject and grade — all on one grid")
+        )
         top.addStretch()
         self.load_button = QPushButton("Load Folder")
         self.load_button.setObjectName("ActionButton")
@@ -548,39 +723,173 @@ class MainWindow(QMainWindow):
         top.addWidget(self.load_button)
         layout.addLayout(top)
 
-        # Labeling + tech-info toolbar.
-        tools = QHBoxLayout()
-        tools.setSpacing(10)
-        tools.addWidget(QLabel("Label:"))
+        # --- Row 1: selection and rejection ------------------------------ #
+        sel_row = QHBoxLayout()
+        sel_row.setSpacing(8)
+        sel_row.addWidget(QLabel("Select:"))
+        for text, slot in (
+            ("All", self._on_select_all),
+            ("None", self._on_select_none),
+            ("Invert", self._on_select_invert),
+        ):
+            btn = QPushButton(text)
+            btn.setObjectName("SecondaryButton")
+            btn.clicked.connect(slot)
+            sel_row.addWidget(btn)
+
+        sel_row.addSpacing(18)
+
+        self.reject_button = QPushButton("Reject Selected")
+        self.reject_button.setObjectName("SecondaryButton")
+        self.reject_button.setToolTip(
+            "Mark the selected photos as rejected. They stop being copied "
+            "into the -edit subfolder. Your original files are never deleted."
+        )
+        self.reject_button.clicked.connect(self._on_reject_selected)
+        sel_row.addWidget(self.reject_button)
+
+        self.restore_button = QPushButton("Keep Selected")
+        self.restore_button.setObjectName("SecondaryButton")
+        self.restore_button.setToolTip("Undo rejection on the selected photos.")
+        self.restore_button.clicked.connect(self._on_restore_selected)
+        sel_row.addWidget(self.restore_button)
+
+        self.review_button = QPushButton("Review Rejected (0)")
+        self.review_button.setObjectName("SecondaryButton")
+        self.review_button.setToolTip(
+            "Look through everything marked rejected before it is left out."
+        )
+        self.review_button.clicked.connect(self._on_review_rejects)
+        sel_row.addWidget(self.review_button)
+
+        sel_row.addStretch()
+
+        sel_row.addWidget(QLabel("Show:"))
+        self.view_filter = QComboBox()
+        self.view_filter.addItems(
+            ["All", "Keepers only", "AI picks (starred)", "Duplicates", "Rejected"]
+        )
+        self.view_filter.setToolTip("Filter which photos the grid shows.")
+        self.view_filter.currentIndexChanged.connect(self._apply_view_filter)
+        sel_row.addWidget(self.view_filter)
+        layout.addLayout(sel_row)
+
+        # --- Row 2: AI culling ------------------------------------------- #
+        cull_row = QHBoxLayout()
+        cull_row.setSpacing(8)
+        cull_row.addWidget(QLabel("AI cull:"))
+
+        self.cull_button = QPushButton("Run Smart Cull")
+        self.cull_button.setObjectName("SecondaryButton")
+        self.cull_button.clicked.connect(self._on_run_cull)
+        cull_row.addWidget(self.cull_button)
+
+        cull_row.addWidget(QLabel("keep best"))
+        self.cull_target_input = QSpinBox()
+        self.cull_target_input.setRange(1, 100000)
+        self.cull_target_input.setValue(400)
+        self.cull_target_input.setFixedWidth(90)
+        self.cull_target_input.setToolTip(
+            "How many keepers you want. The quota is spread across bursts so "
+            "no part of the shoot gets dropped wholesale."
+        )
+        cull_row.addWidget(self.cull_target_input)
+
+        self.cull_target_button = QPushButton("Select Top N")
+        self.cull_target_button.setObjectName("SecondaryButton")
+        self.cull_target_button.clicked.connect(self._on_cull_to_target)
+        cull_row.addWidget(self.cull_target_button)
+
+        self.cull_eyes_check = QCheckBox("Skip blinks")
+        self.cull_eyes_check.setToolTip(
+            "Detect faces and closed eyes, then prefer an open-eyed frame "
+            "over a sharper one where everybody blinked. Slower, since every "
+            "frame runs through the face model."
+        )
+        cull_row.addWidget(self.cull_eyes_check)
+
+        self.reject_nonpicks_button = QPushButton("Reject Non-Picks")
+        self.reject_nonpicks_button.setObjectName("SecondaryButton")
+        self.reject_nonpicks_button.setToolTip(
+            "Mark everything the cull did not pick as rejected, so only the "
+            "keepers reach the edit folder. Reversible."
+        )
+        self.reject_nonpicks_button.clicked.connect(self._on_reject_nonpicks)
+        cull_row.addWidget(self.reject_nonpicks_button)
+
+        self.xmp_button = QPushButton("Write XMP")
+        self.xmp_button.setObjectName("SecondaryButton")
+        self.xmp_button.setToolTip(
+            "Write star ratings and colour labels to .xmp files beside each "
+            "image, so Lightroom, Capture One, Photo Mechanic or Bridge open "
+            "with these picks already applied. Originals are not modified."
+        )
+        self.xmp_button.clicked.connect(self._on_write_xmp)
+        cull_row.addWidget(self.xmp_button)
+
+        self.xmp_reject_check = QCheckBox("Mark non-picks rejected in XMP")
+        cull_row.addWidget(self.xmp_reject_check)
+        cull_row.addStretch()
+        layout.addLayout(cull_row)
+
+        # --- Row 3: grading ---------------------------------------------- #
+        color_row = QHBoxLayout()
+        color_row.setSpacing(8)
+        color_row.addWidget(QLabel("Grade:"))
+
+        self.color_mode = QComboBox()
+        self.color_mode.addItems(["Cinematic Filter", "Selective Color"])
+        color_row.addWidget(self.color_mode)
+
+        self.filter_combo = QComboBox()
+        self.filter_combo.addItems(ColorEngine.FILTERS)
+        color_row.addWidget(self.filter_combo)
+
+        self.color_combo = QComboBox()
+        self.color_combo.addItems(ColorEngine.COLORS)
+        color_row.addWidget(self.color_combo)
+
+        self.apply_color_button = QPushButton("Apply to Selected")
+        self.apply_color_button.setObjectName("ActionButton")
+        self.apply_color_button.clicked.connect(self._on_apply_color)
+        color_row.addWidget(self.apply_color_button)
+
+        self.remove_bg_button = QPushButton("Remove BG → PNG")
+        self.remove_bg_button.setObjectName("SecondaryButton")
+        self.remove_bg_button.clicked.connect(self._on_remove_background)
+        color_row.addWidget(self.remove_bg_button)
+
+        color_row.addSpacing(18)
+        color_row.addWidget(QLabel("Label:"))
         self.label_combo = QComboBox()
         self.label_combo.setEditable(True)
         self.label_combo.addItems(
             ["Graduation", "Nature", "Portraits", "Travel", "Events", "Wildlife"]
         )
-        self.label_combo.setMinimumWidth(180)
-        tools.addWidget(self.label_combo)
+        self.label_combo.setMinimumWidth(140)
+        color_row.addWidget(self.label_combo)
 
-        apply_label_btn = QPushButton("Apply to Selected")
+        apply_label_btn = QPushButton("Apply")
         apply_label_btn.setObjectName("SecondaryButton")
         apply_label_btn.clicked.connect(self._on_apply_label)
-        tools.addWidget(apply_label_btn)
+        color_row.addWidget(apply_label_btn)
 
         clear_label_btn = QPushButton("Clear Label")
         clear_label_btn.setObjectName("SecondaryButton")
         clear_label_btn.clicked.connect(self._on_clear_label)
-        tools.addWidget(clear_label_btn)
+        color_row.addWidget(clear_label_btn)
 
-        tools.addStretch()
-
+        color_row.addStretch()
         self.tech_info_check = QCheckBox("Show Tech Info")
         self.tech_info_check.toggled.connect(self._on_toggle_tech)
-        tools.addWidget(self.tech_info_check)
-        layout.addLayout(tools)
+        color_row.addWidget(self.tech_info_check)
+        layout.addLayout(color_row)
 
         self.progress = QProgressBar()
         self.progress.setVisible(False)
         layout.addWidget(self.progress)
 
+        # --- The grid: always on screen ---------------------------------- #
         self.grid_scroll = QScrollArea()
         self.grid_scroll.setWidgetResizable(True)
         self.grid_host = QWidget()
@@ -594,154 +903,31 @@ class MainWindow(QMainWindow):
         self.status_label.setObjectName("PageSubtitle")
         layout.addWidget(self.status_label)
 
-        return page
-
-    # --- AI Cull --------------------------------------------------------- #
-
-    def _build_cull_page(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(28, 24, 28, 24)
-        layout.setSpacing(16)
-
-        top = QHBoxLayout()
-        top.addLayout(
-            self._page_header("AI Cull", "Sharpness scoring + burst grouping, best-of-burst picks")
-        )
-        top.addStretch()
-        self.cull_button = QPushButton("Run Smart Cull")
-        self.cull_button.setObjectName("ActionButton")
-        self.cull_button.clicked.connect(self._on_run_cull)
-        top.addWidget(self.cull_button)
-        layout.addLayout(top)
-
-        # Cull to Target: photographers think in deliverable counts ("the best
-        # 400 of these 3,000"), not sharpness thresholds.
-        target_row = QHBoxLayout()
-        target_row.setSpacing(10)
-        target_row.addWidget(QLabel("Cull to target:"))
-        self.cull_target_input = QSpinBox()
-        self.cull_target_input.setRange(1, 100000)
-        self.cull_target_input.setValue(400)
-        self.cull_target_input.setFixedWidth(110)
-        self.cull_target_input.setToolTip(
-            "How many keepers you want. The quota is spread across bursts so "
-            "no part of the shoot gets dropped wholesale."
-        )
-        target_row.addWidget(self.cull_target_input)
-        self.cull_target_button = QPushButton("Select Top N")
-        self.cull_target_button.clicked.connect(self._on_cull_to_target)
-        target_row.addWidget(self.cull_target_button)
-
-        target_row.addSpacing(24)
-        self.xmp_button = QPushButton("Write XMP Sidecars")
-        self.xmp_button.setToolTip(
-            "Write star ratings and colour labels to .xmp files beside each "
-            "image, so Lightroom, Capture One, Photo Mechanic or Bridge open "
-            "with these picks already applied. Your originals are not modified."
-        )
-        self.xmp_button.clicked.connect(self._on_write_xmp)
-        target_row.addWidget(self.xmp_button)
-
-        self.cull_eyes_check = QCheckBox("Skip blinks")
-        self.cull_eyes_check.setToolTip(
-            "Detect faces and closed eyes, then prefer an open-eyed frame "
-            "over a sharper one where everybody blinked. Slower, since every "
-            "frame runs through the face model."
-        )
-        target_row.addWidget(self.cull_eyes_check)
-
-        self.xmp_reject_check = QCheckBox("Mark non-picks as rejected")
-        self.xmp_reject_check.setToolTip(
-            "Write rating -1 (Lightroom's reject flag) instead of leaving "
-            "non-picks unrated."
-        )
-        target_row.addWidget(self.xmp_reject_check)
-        target_row.addStretch()
-        layout.addLayout(target_row)
-
-        self.cull_results = QLabel("Load a folder in Library, then run Smart Cull.")
+        # Cull report, collapsed by default: useful detail, but it should not
+        # compete with the photographs for space.
+        self.cull_results = QLabel("Run a cull to see per-frame scores here.")
         self.cull_results.setObjectName("PageSubtitle")
         self.cull_results.setWordWrap(True)
         self.cull_results.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-
-        cull_scroll = QScrollArea()
-        cull_scroll.setWidgetResizable(True)
+        self.cull_scroll = QScrollArea()
+        self.cull_scroll.setWidgetResizable(True)
+        self.cull_scroll.setMaximumHeight(170)
+        self.cull_scroll.setVisible(False)
         cull_host = QWidget()
-        cull_layout = QVBoxLayout(cull_host)
-        cull_layout.addWidget(self.cull_results)
-        cull_layout.addStretch()
-        cull_scroll.setWidget(cull_host)
-        layout.addWidget(cull_scroll, stretch=1)
+        cull_host_layout = QVBoxLayout(cull_host)
+        cull_host_layout.addWidget(self.cull_results)
+        cull_host_layout.addStretch()
+        self.cull_scroll.setWidget(cull_host)
+        layout.addWidget(self.cull_scroll)
 
-        return page
+        self.cull_detail_toggle = QCheckBox("Show cull report")
+        self.cull_detail_toggle.toggled.connect(self.cull_scroll.setVisible)
+        layout.addWidget(self.cull_detail_toggle)
 
-    # --- Color / Filters -------------------------------------------------- #
-
-    def _build_color_page(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(28, 24, 28, 24)
-        layout.setSpacing(16)
-
-        top = QHBoxLayout()
-        top.addLayout(
-            self._page_header("Color / Filters", "Selective color isolation and cinematic grades")
-        )
-        top.addStretch()
-        layout.addLayout(top)
-
-        controls = QHBoxLayout()
-        controls.setSpacing(12)
-
-        controls.addWidget(QLabel("Mode:"))
-        self.color_mode = QComboBox()
-        self.color_mode.addItems(["Cinematic Filter", "Selective Color"])
-        controls.addWidget(self.color_mode)
-
-        controls.addWidget(QLabel("Filter:"))
-        self.filter_combo = QComboBox()
-        self.filter_combo.addItems(ColorEngine.FILTERS)
-        controls.addWidget(self.filter_combo)
-
-        controls.addWidget(QLabel("Isolate color:"))
-        self.color_combo = QComboBox()
-        self.color_combo.addItems(ColorEngine.COLORS)
-        controls.addWidget(self.color_combo)
-
-        self.apply_color_button = QPushButton("Apply to Selected")
-        self.apply_color_button.setObjectName("ActionButton")
-        self.apply_color_button.clicked.connect(self._on_apply_color)
-        controls.addWidget(self.apply_color_button)
-        controls.addStretch()
-        layout.addLayout(controls)
-
-        # Background removal (separate row).
-        bg_row = QHBoxLayout()
-        bg_row.addWidget(QLabel("Remove background:"))
-        self.remove_bg_button = QPushButton("Remove BG & Export as PNG")
-        self.remove_bg_button.setObjectName("ActionButton")
-        self.remove_bg_button.clicked.connect(self._on_remove_background)
-        bg_row.addWidget(self.remove_bg_button)
-        bg_row.addStretch()
-        layout.addLayout(bg_row)
-
-        self.color_preview = QLabel("Select an image in Library, choose a mode, and apply.")
-        self.color_preview.setObjectName("PageSubtitle")
-        self.color_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.color_preview.setMinimumHeight(480)
-
-        preview_scroll = QScrollArea()
-        preview_scroll.setWidgetResizable(True)
-        preview_scroll.setWidget(self.color_preview)
-        layout.addWidget(preview_scroll, stretch=1)
-
-        self.color_status = QLabel(
-            "Edited images are saved into the folder's -edit subfolder as *_graded.jpg or *_nobg.png — "
-            "originals are never modified. Background removal outputs RGBA PNG with transparency."
-        )
-        self.color_status.setObjectName("PageSubtitle")
-        layout.addWidget(self.color_status)
+        # The colour panel wrote its own status line; the shared status label
+        # covers it now, but handlers still reference these names.
+        self.color_status = self.status_label
+        self.color_preview = self.status_label
 
         return page
 
@@ -1075,9 +1261,195 @@ class MainWindow(QMainWindow):
         else:
             self.selected.add(path)
             cell.set_selected(True)
+        self._refresh_status()
+
+    # ------------------------------------------------------------------ #
+    # Selection
+    # ------------------------------------------------------------------ #
+
+    def _visible_paths(self) -> list[Path]:
+        """Paths currently shown by the grid, honouring the view filter."""
+        return [p for p in self.image_paths if self._passes_view_filter(str(p))]
+
+    def _sync_selection_ui(self) -> None:
+        for path, cell in self.cells.items():
+            cell.set_selected(path in self.selected)
+        self._refresh_status()
+
+    def _on_select_all(self) -> None:
+        """Select everything the grid is showing.
+
+        Scoped to what is visible rather than the whole folder, so 'All'
+        while filtered to Duplicates means those duplicates -- selecting
+        hidden frames you cannot see would be a trap.
+        """
+        if not self.image_paths:
+            return
+        self.selected = {str(p) for p in self._visible_paths()}
+        self._sync_selection_ui()
+
+    def _on_select_none(self) -> None:
+        self.selected.clear()
+        self._sync_selection_ui()
+
+    def _on_select_invert(self) -> None:
+        visible = {str(p) for p in self._visible_paths()}
+        self.selected = visible - self.selected
+        self._sync_selection_ui()
+
+    # ------------------------------------------------------------------ #
+    # Rejection -- never a file delete
+    # ------------------------------------------------------------------ #
+
+    def _set_rejected(self, paths, rejected: bool) -> None:
+        for path in paths:
+            key = str(path)
+            if rejected:
+                self.rejected.add(key)
+            else:
+                self.rejected.discard(key)
+            cell = self.cells.get(key)
+            if cell is not None:
+                cell.set_rejected(rejected)
+        self._refresh_reject_button()
+        self._apply_view_filter()
+        self._refresh_status()
+
+    def _refresh_reject_button(self) -> None:
+        if hasattr(self, "review_button"):
+            self.review_button.setText(f"Review Rejected ({len(self.rejected)})")
+
+    def _on_reject_selected(self) -> None:
+        targets = self._selected_paths()
+        if not targets:
+            QMessageBox.information(
+                self, "Nothing selected", "Select the photos you want to reject first."
+            )
+            return
+        self._set_rejected(targets, True)
         self.status_label.setText(
-            f"{len(self.image_paths)} images · {len(self.selected)} selected"
+            f"{len(targets)} photo(s) rejected — they will not be copied into "
+            f"the edit folder. Your original files are untouched."
         )
+
+    def _on_restore_selected(self) -> None:
+        targets = [p for p in self._selected_paths() if str(p) in self.rejected]
+        if not targets:
+            QMessageBox.information(
+                self, "Nothing to restore", "None of the selected photos are rejected."
+            )
+            return
+        self._set_rejected(targets, False)
+        self.status_label.setText(f"{len(targets)} photo(s) kept.")
+
+    def _on_reject_nonpicks(self) -> None:
+        """Reject everything the last cull did not pick."""
+        if not self.last_cull_frames:
+            QMessageBox.information(
+                self,
+                "No cull yet",
+                "Run Smart Cull or Select Top N first, so there are picks to keep.",
+            )
+            return
+        losers = [f.path for f in self.last_cull_frames if not f.is_starred]
+        if not losers:
+            QMessageBox.information(self, "Nothing to reject", "Every frame was picked.")
+            return
+        self._set_rejected(losers, True)
+        keepers = len(self.last_cull_frames) - len(losers)
+        self.status_label.setText(
+            f"Rejected {len(losers)} non-picks; {keepers} keeper(s) remain. "
+            f"Nothing was deleted — review them before exporting."
+        )
+
+    def _on_review_rejects(self) -> None:
+        if not self.rejected:
+            QMessageBox.information(
+                self,
+                "Nothing rejected",
+                "No photos are marked as rejected yet.\n\n"
+                "Select photos and click “Reject Selected”, or run a cull and "
+                "use “Reject Non-Picks”.",
+            )
+            return
+        ordered = [str(p) for p in self.image_paths if str(p) in self.rejected]
+        dialog = RejectsDialog(ordered, self.loader, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        still = dialog.still_rejected()
+        restored = [p for p in ordered if p not in still]
+        if restored:
+            self._set_rejected(restored, False)
+        self._set_rejected([p for p in ordered if p in still], True)
+        self.status_label.setText(
+            f"{len(still)} photo(s) stay rejected"
+            + (f", {len(restored)} restored." if restored else ".")
+            + " Originals are untouched either way."
+        )
+
+    # ------------------------------------------------------------------ #
+    # View filter -- makes the cull result visible on the grid
+    # ------------------------------------------------------------------ #
+
+    def _passes_view_filter(self, path: str) -> bool:
+        mode = self.view_filter.currentText() if hasattr(self, "view_filter") else "All"
+        is_rejected = path in self.rejected
+        if mode == "All":
+            return True
+        if mode == "Keepers only":
+            return not is_rejected
+        if mode == "Rejected":
+            return is_rejected
+        cell = self.cells.get(path)
+        if mode == "AI picks (starred)":
+            return bool(cell and cell.starred)
+        if mode == "Duplicates":
+            return bool(cell and cell.duplicate)
+        return True
+
+    def _apply_view_filter(self) -> None:
+        """Show or hide cells to match the chosen filter."""
+        if not hasattr(self, "view_filter"):
+            return
+        shown = 0
+        for path, cell in self.cells.items():
+            visible = self._passes_view_filter(path)
+            cell.setVisible(visible)
+            if visible:
+                shown += 1
+        self._refresh_status(shown)
+
+    def _refresh_status(self, shown: int | None = None) -> None:
+        if not self.image_paths:
+            return
+        if shown is None:
+            shown = sum(1 for c in self.cells.values() if not c.isHidden())
+        total = len(self.image_paths)
+        parts = [f"{total} photo(s)"]
+        if shown != total:
+            parts.append(f"{shown} shown")
+        parts.append(f"{len(self.selected)} selected")
+        if self.rejected:
+            parts.append(f"{len(self.rejected)} rejected")
+        if self.edit_folder is not None:
+            parts.append(f"edits → {self.edit_folder.name}/")
+        self.status_label.setText("  ·  ".join(parts))
+
+    def _drop_rejected(self, paths, action: str) -> list:
+        """Filter rejected frames out of an export.
+
+        This is the whole meaning of "rejected": the photo is skipped when
+        anything is written into the -edit subfolder. The original file on
+        disk is never deleted, moved or altered by this app.
+        """
+        kept = [p for p in paths if str(p) not in self.rejected]
+        dropped = len(paths) - len(kept)
+        if dropped:
+            self.status_label.setText(
+                f"{action}: skipping {dropped} rejected photo(s). "
+                f"Originals remain on disk untouched."
+            )
+        return kept
 
     def _selected_paths(self) -> list[Path]:
         return [p for p in self.image_paths if str(p) in self.selected]
@@ -1096,9 +1468,16 @@ class MainWindow(QMainWindow):
         self.edit_folder = self.loader.get_edit_folder(self.current_folder)
         self.image_paths = self.loader.scan_folder(self.current_folder)
         self.selected.clear()
+        self.rejected.clear()
+        self.last_cull_frames = []
         self.web_selected.clear()
         self.metadata.clear()
         self.labels.clear()
+        self._refresh_reject_button()
+        if hasattr(self, "view_filter"):
+            self.view_filter.blockSignals(True)
+            self.view_filter.setCurrentIndex(0)
+            self.view_filter.blockSignals(False)
 
         # Clear the grid.
         if self._thumb_worker is not None:
@@ -1126,9 +1505,12 @@ class MainWindow(QMainWindow):
         self.progress.setVisible(True)
         self.progress.setMaximum(len(self.image_paths))
         self.progress.setValue(0)
+        # Say plainly where edits will land. The folder is created here, not
+        # on first export, so it is visible in Explorer straight away.
         self.status_label.setText(
-            f"Loading {len(self.image_paths)} images… "
-            f"Edits and web keepers will be saved to {self.edit_folder.name}/"
+            f"Loading {len(self.image_paths)} images…  "
+            f"Edits will be saved into {self.current_folder.name}/{self.edit_folder.name}/ "
+            f"— your originals are never modified."
         )
 
         self._thumb_worker = ThumbnailWorker(self.loader, list(self.image_paths), parent=self)
@@ -1155,9 +1537,7 @@ class MainWindow(QMainWindow):
 
     def _on_thumbs_done(self) -> None:
         self.progress.setVisible(False)
-        self.status_label.setText(
-            f"{len(self.image_paths)} images · {len(self.selected)} selected"
-        )
+        self._refresh_status()
 
     # ------------------------------------------------------------------ #
     # Labeling & tech info
@@ -1414,7 +1794,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ #
 
     def _on_apply_color(self) -> None:
-        targets = self._selected_paths()
+        targets = self._drop_rejected(self._selected_paths(), "Grade")
         if not targets:
             QMessageBox.information(
                 self, "No selection", "Select one or more images in Library first."
@@ -1464,7 +1844,7 @@ class MainWindow(QMainWindow):
 
     def _on_remove_background(self) -> None:
         """Remove background from selected images, export as transparent PNG."""
-        targets = self._selected_paths()
+        targets = self._drop_rejected(self._selected_paths(), "Background removal")
         if not targets:
             QMessageBox.information(
                 self, "No selection", "Select one or more images in Library first."
@@ -1514,7 +1894,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ #
 
     def _on_create_reel(self) -> None:
-        targets = self._selected_paths()
+        targets = self._drop_rejected(self._selected_paths(), "Reel")
         if not 3 <= len(targets) <= 7:
             QMessageBox.information(
                 self,
@@ -1540,7 +1920,7 @@ class MainWindow(QMainWindow):
         self._run_task(work, done, self.reel_button)
 
     def _on_export_ig(self) -> None:
-        targets = self._selected_paths()
+        targets = self._drop_rejected(self._selected_paths(), "Instagram export")
         if not targets:
             QMessageBox.information(
                 self, "No selection", "Select one or more images in Library first."
@@ -1584,7 +1964,15 @@ class MainWindow(QMainWindow):
         if not out_dir:
             return
 
-        targets = [Path(p) for p in self.web_selected]
+        targets = self._drop_rejected([Path(p) for p in self.web_selected], "Gallery")
+        if not targets:
+            QMessageBox.information(
+                self,
+                "Everything rejected",
+                "Every photo marked for the web is also rejected, so the "
+                "gallery would be empty. Keep some of them first.",
+            )
+            return
         group_by_label = self.web_group_by_label.isChecked()
         auto_fix = self.web_auto_fix.isChecked()
         gallery_title = self.gallery_title_input.text().strip() or "Granite Studios Gallery"

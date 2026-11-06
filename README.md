@@ -106,6 +106,13 @@ architecture and deployment steps.
 
 ## Features
 
+### Reviewing and rejecting
+- **Select All / None / Invert**, scoped to whatever the view filter is showing — selecting frames you cannot see would be a trap
+- **Reject Selected** marks photos as out. **Rejected never means deleted:** the original file is never moved, renamed or removed. It simply stops being copied into the `-edit` subfolder
+- **Review Rejected** opens every rejected frame as thumbnails before anything is acted on, with a tick per photo so you can put any of them back
+- **Reject Non-Picks** rejects everything a cull did not choose, in one click, reversibly
+- **Show:** filters the grid to *Keepers*, *AI picks*, *Duplicates* or *Rejected*, so you can actually see what the cull decided instead of reading it in a report
+
 ### Library & Culling
 - **Universal loader**: One-click folder import. Embedded RAW thumbnails cached for instant preview scrolling
 - **Smart cull**: Laplacian-variance sharpness scoring + timestamp-based burst grouping. Auto-stars the top 2 sharpest of each burst
@@ -200,8 +207,13 @@ RAM is automatically profiled at startup. Large operations (batch exports) are s
 
 ## Usage Workflow
 
+> **One pane, not three.** Import, culling, rejection and grading all happen
+> on the **Photos** page against a single grid that stays on screen. They used
+> to be three separate tabs, which hid the photographs at exactly the moment
+> you needed to see what an action had done.
+
 ### 1. Load & Cull
-- Click **Load Folder** in the Library tab
+- Click **Load Folder** on the Photos page
 - Edit subfolder `<FolderName>-edit` is created automatically
 - Run **Smart Cull** to score sharpness and group similar frames → stars the best of each burst
 
