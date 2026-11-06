@@ -1,0 +1,151 @@
+name: Publish installer
+
+# Keeps the downloadable "install me" file current. On every push to main the
+# installer scripts are validated and then re-published as a release asset, so
+# https://github.com/<owner>/<repo>/releases/latest/download/Install-GraniteStudios.bat
+# always serves the newest version without anyone having to remember to upload it.
+#
+# Validation runs first and the publish step is gated on it, so a broken
+# installer never reaches that URL.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'install/**'
+      - 'src/**'
+      - 'main.py'
+      - 'requirements.txt'
+      - '.github/workflows/installer.yml'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-installer
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Validate installer
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: PowerShell scripts parse
+        shell: pwsh
+        run: |
+          $failed = $false
+          foreach ($f in @('install/install.ps1', 'install/uninstall.ps1')) {
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $f), [ref]$null, [ref]$errors) | Out-Null
+            if ($errors) {
+              Write-Host "::error file=$f::$($errors.Count) parse error(s)"
+              $errors | ForEach-Object { Write-Host "  $($_.Message)" }
+              $failed = $true
+            } else {
+              Write-Host "ok: $f"
+            }
+          }
+          if ($failed) { exit 1 }
+
+      - name: Bootstrap is self-contained and well-formed
+        shell: pwsh
+        run: |
+          $bat = 'install/Install-GraniteStudios.bat'
+          $text = Get-Content $bat -Raw
+          $fail = $false
+          # The payload marker is what the .bat half uses to find the
+          # PowerShell half; without it the file is inert.
+          if ($text -notmatch '(?m)^:PS_PAYLOAD_BEGIN') {
+            Write-Host "::error file=$bat::missing :PS_PAYLOAD_BEGIN marker"; $fail = $true
+          }
+          # It must point at this repository, or it would install someone else's code.
+          if ($text -notmatch [regex]::Escape("'$env:GITHUB_REPOSITORY'")) {
+            Write-Host "::error file=$bat::does not reference $env:GITHUB_REPOSITORY"; $fail = $true
+          }
+          # cmd.exe must never fall through into the PowerShell payload.
+          if ($text -notmatch 'exit /b %EXITCODE%') {
+            Write-Host "::error file=$bat::no exit before the payload"; $fail = $true
+          }
+          # The embedded payload has to parse as PowerShell on its own.
+          $lines = Get-Content $bat
+          $idx = ($lines | Select-String -Pattern '^:PS_PAYLOAD_BEGIN' -List).LineNumber
+          if ($idx) {
+            $payload = ($lines[$idx..($lines.Count - 1)]) -join [Environment]::NewLine
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseInput(
+              $payload, [ref]$null, [ref]$errors) | Out-Null
+            if ($errors) {
+              Write-Host "::error file=$bat::embedded payload has $($errors.Count) parse error(s)"
+              $errors | ForEach-Object { Write-Host "  $($_.Message)" }
+              $fail = $true
+            } else {
+              Write-Host "ok: embedded PowerShell payload parses"
+            }
+          }
+          if ($fail) { exit 1 }
+
+      - name: Application code compiles
+        shell: pwsh
+        run: |
+          python -m compileall -q src main.py
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          Write-Host 'ok: src/ and main.py compile'
+
+      - name: Installer reaches the Python check end-to-end
+        shell: pwsh
+        run: |
+          # Runs the real installer far enough to prove it parses, resolves
+          # -SourceDir, and finds a Python. A full install (venv + OpenCV +
+          # the AI models) is too slow for every push.
+          $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass `
+                   -File install/install.ps1 -SourceDir (Get-Location).Path 2>&1 |
+                 Select-Object -First 12 | Out-String
+          Write-Host $out
+          if ($out -notmatch 'Looking for Python') {
+            Write-Host '::error::installer did not reach the Python check'; exit 1
+          }
+          if ($out -notmatch [regex]::Escape((Get-Location).Path)) {
+            Write-Host '::error::-SourceDir was not honoured'; exit 1
+          }
+          Write-Host 'ok: installer runs and honours -SourceDir'
+
+  publish:
+    name: Publish to Releases
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Upload installer to the rolling release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG=installer
+          NOTES=$(cat <<'EOF'
+          **Download `Install-GraniteStudios.bat` below, then double-click it.**
+
+          It fetches the latest Granite Studios and installs it — one file, nothing
+          else to download. Re-run it any time to update an existing install.
+
+          Needs Python 3.10+ installed once; the installer links to it if missing.
+
+          This release is refreshed automatically on every change to `main`, so the
+          download is always current.
+          EOF
+          )
+          # Create the release on first run, then just replace the asset after.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --title "Granite Studios Installer (latest)" --notes "$NOTES"
+          else
+            gh release create "$TAG" \
+              --title "Granite Studios Installer (latest)" \
+              --notes "$NOTES" \
+              --latest
+          fi
+          gh release upload "$TAG" install/Install-GraniteStudios.bat --clobber
+          echo "Published: https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/Install-GraniteStudios.bat"

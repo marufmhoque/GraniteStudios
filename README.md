@@ -1,5 +1,13 @@
 # Granite Studios
 
+### [⬇️ Download the installer](https://github.com/marufmhoque/GraniteStudios/releases/latest/download/Install-GraniteStudios.bat)
+
+One file. Download it, double-click it, done — it fetches the latest version
+and installs it for you. Re-run the same file any time to update.
+[![Publish installer](https://github.com/marufmhoque/GraniteStudios/actions/workflows/installer.yml/badge.svg)](https://github.com/marufmhoque/GraniteStudios/actions/workflows/installer.yml)
+
+---
+
 **Local-first AI photo and video editing suite** for photographers and content creators. Designed to run smoothly on modest hardware (i5-8350U + 32GB RAM), but scales to powerful machines with CUDA or Apple Silicon.
 
 - 📸 **Universal input**: RAW (Nikon, Canon, Sony, etc.), HEIC, JPEG, PNG, and more
@@ -13,9 +21,31 @@
 
 ### Windows (recommended)
 
-1. Download or clone this repository.
-2. Open the `install` folder and double-click **`Install Granite Studios.bat`**.
-3. Launch it from the Desktop shortcut or the Start Menu.
+1. **[Download `Install-GraniteStudios.bat`](https://github.com/marufmhoque/GraniteStudios/releases/latest/download/Install-GraniteStudios.bat)**
+2. Double-click it.
+3. Launch Granite Studios from the Desktop shortcut or the Start Menu.
+
+That single file is all you need — it downloads the app itself, so there is no
+repository to clone and nothing else to fetch. **Run it again whenever you want
+to update**: it pulls the latest version and installs over the old one, leaving
+your photos and `-edit` folders alone.
+
+The download link always serves the current version — a GitHub Action
+re-publishes it on every change to `main`, and the file fetches `main` when it
+runs, so it cannot go stale.
+
+<details>
+<summary>Already have the repository cloned?</summary>
+
+Open the `install` folder and double-click **`Install Granite Studios.bat`**
+instead — it installs from your local copy rather than downloading. Or run the
+installer directly against any source tree:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File install\install.ps1 -SourceDir C:\path\to\GraniteStudios
+```
+
+</details>
 
 The installer copies the app to `%LOCALAPPDATA%\Granite Studios`, builds it a
 private Python environment so it cannot disturb any other Python on the

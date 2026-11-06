@@ -7,13 +7,23 @@
 # Why it copies instead of running in place: a checkout often lives in a synced
 # folder (Google Drive, OneDrive, Dropbox). Those paths come and go, are slow to
 # read, and break pip installs. A local copy makes launching deterministic.
+#
+# -SourceDir lets the one-file bootstrap (Install-GraniteStudios.bat) point this
+# at a freshly downloaded copy instead of a sibling checkout. Defaults to the
+# parent of this script, so running it from a clone still just works.
+
+[CmdletBinding()]
+param(
+    [string] $SourceDir
+)
 
 $ErrorActionPreference = 'Stop'
 
 $AppName    = 'Granite Studios'
 $InstallDir = Join-Path $env:LOCALAPPDATA 'Granite Studios'
 $VenvDir    = Join-Path $InstallDir 'venv'
-$SourceDir  = Split-Path -Parent $PSScriptRoot
+if (-not $SourceDir) { $SourceDir = Split-Path -Parent $PSScriptRoot }
+$SourceDir  = (Resolve-Path -LiteralPath $SourceDir).Path
 
 function Say   ($m) { Write-Host "  $m" }
 function Ok    ($m) { Write-Host "  [ok] $m"   -ForegroundColor Green }
@@ -250,7 +260,11 @@ Set-Content -Path (Join-Path $env:USERPROFILE '.granitestudios_shortcut_created'
             -Value 'created by installer' -Encoding utf8
 
 # ----------------------------------------------------------- Uninstaller ----
-Copy-Item (Join-Path $PSScriptRoot 'uninstall.ps1') -Destination $InstallDir -Force -ErrorAction SilentlyContinue
+# Take the uninstaller from the source tree, not from beside this script --
+# the bootstrap runs install.ps1 out of a downloaded copy.
+$uninstallSrc = Join-Path $SourceDir 'install\uninstall.ps1'
+if (-not (Test-Path -LiteralPath $uninstallSrc)) { $uninstallSrc = Join-Path $PSScriptRoot 'uninstall.ps1' }
+Copy-Item $uninstallSrc -Destination $InstallDir -Force -ErrorAction SilentlyContinue
 $uninstallBat = @"
 @echo off
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0uninstall.ps1"
