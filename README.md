@@ -106,6 +106,19 @@ architecture and deployment steps.
 
 ## Features
 
+### Blur triage
+- **Find Blurry** scores every frame and separates *motion blur* from *missed focus*: a smear destroys detail along one axis, so the gradients bunch in one direction, whereas defocus softens every direction equally. Motion direction is reported too (±15° across 15 synthetic test cases)
+- **Strictness** — *Aggressive* catches mild softness for reclaiming storage, *Conservative* only flags clearly unusable frames
+- Blurry frames are **marked rejected, not deleted**, so they land in the same review drawer and can be put back
+- **Sharpen Recoverable** is offered only for frames with detail left to lift. Past that point sharpening adds halos rather than restoring detail — the Laplacian score rises either way, which is exactly why the score alone does not decide it
+
+### Auto-levelling
+- **Auto-Level Selected** straightens a whole batch in one pass
+- *Which way up* comes from face detection — a detector will not fire on an upside-down face, so each quarter turn is tried. All 90/180/270 turns were recovered correctly
+- *How far off level* comes from the straight lines in the scene. Round-tripping known tilts leaves **under 1° residual**
+- Rotating leaves wedge corners; **Crop corners** cuts back to the largest clean rectangle, or leave it off to keep them black. There is no generative fill
+- **Head roll is deliberately not used.** See the caveat below
+
 ### Reviewing and rejecting
 - **Select All / None / Invert**, scoped to whatever the view filter is showing — selecting frames you cannot see would be a trap
 - **Reject Selected** marks photos as out. **Rejected never means deleted:** the original file is never moved, renamed or removed. It simply stops being copied into the `-edit` subfolder
@@ -276,6 +289,8 @@ What that covers today:
 | `xmp_sidecar.py` | Ratings 0-5 and -1 round-trip; all five Lightroom labels; clamping; **merge preserves another tool's `crs:` develop settings, `dc:title` and keywords**; a corrupt sidecar degrades instead of raising; batch write over a real cull |
 | `cull_to_target` | Quota spread evenly across bursts, picks each burst's sharpest first; clamps above the image count; rejects a negative target |
 | `create_shortcut.py` | Writes a `.lnk` whose argument is quoted, targets `pythonw.exe`, and launches successfully from a path containing a space |
+| `blur_analysis.py` | Sharp frames not flagged across 3 reference images; defocus classified correctly at 2 blur radii each; **15/15 motion cases detected with direction within 15°**; strictness levels verified to change the verdict on the same frame; the rescue gate refuses frames past recovery |
+| `orientation.py` | Upright frames left alone; **all 90/180/270 turns recovered**; known tilts round-tripped to under 1° residual; crop leaves no black corners; batch skips already-level frames |
 | `face_analysis.py` | Model download checksum-pinned and verified; detects two real faces and **no false positives** across six non-face sample images; stable from 0.4x to 2x scale; grayscale, RGBA, empty and `None` inputs; landmarks mapped back to full-resolution coordinates after downscaling; **degrades to unavailable rather than raising when the model is absent** |
 | blink-aware culling | With eye checking off, the sharpest frame wins even with closed eyes; with it on, the same burst picks the softer open-eyed frame instead — verified on bursts built so sharpness and open eyes disagree |
 | `video/` | Every timing, spatial, structure, audio, and colour operation; all 4 export presets; `.cube` LUT; multi-step `JobManager` pipelines including the failure path |
@@ -417,6 +432,27 @@ nothing here reads as a promise the code does not keep.
 - [ ] Batch watermarking
 - [ ] Direct Instagram upload (currently exports, you upload)
 - [ ] Keyboard shortcuts for rapid culling
+
+### Why auto-levelling ignores head roll
+
+The obvious approach — level the line between the detected eyes — does not
+work with the bundled face model, and the measurements are recorded here so
+the idea is not retried blind:
+
+- Rotating a portrait through **24°** moved the measured eye line by about
+  **5°**. YuNet regresses its landmarks toward an upright configuration, so
+  the eye line is close to horizontal whatever the head is doing.
+- Searching for the rotation of peak detection confidence fails for the same
+  underlying reason: the detector is deliberately tolerant of in-plane
+  rotation, so confidence stayed **flat across the entire ±20° sweep**.
+
+Head roll therefore needs a model that reports pose. None is bundled, so
+face-based fine levelling here would be guesswork dressed as measurement.
+Scene lines are used instead, and they measure well.
+
+**Also not built:** reading shoulders, spine and hips (needs pose
+estimation), and generative corner fill (needs an inpainting model). A
+subject whose torso leans but whose surroundings are square is left alone.
 
 ### How blink detection actually works, and what it is not
 

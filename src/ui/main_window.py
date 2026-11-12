@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+import cv2
 import numpy as np
 from PIL import Image
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize, QPropertyAnimation, QEasingCurve
@@ -42,6 +43,8 @@ from PyQt6.QtWidgets import (
 from src.engine.hardware import get_hardware_summary
 from src.engine.resources import resource_path
 from src.engine.universal_loader import UniversalLoader, ImageMetadata
+from src.ai_tools import blur_analysis
+from src.ai_tools import orientation
 from src.ai_tools import xmp_sidecar
 from src.ai_tools.culling import SmartCull
 from src.ai_tools.color_engine import ColorEngine
@@ -241,6 +244,7 @@ class ThumbnailCell(QLabel):
         # Remembered so the view filter can show just picks or duplicates.
         self.starred = False
         self.duplicate = False
+        self.blur_verdict = None
         self.metadata: ImageMetadata | None = None
         self.label_text = ""
         self._badge = ""
@@ -284,6 +288,11 @@ class ThumbnailCell(QLabel):
         )
         self.web_checkbox.toggled.connect(lambda checked: self.web_toggled.emit(self.path, checked))
 
+        # Under the star badge: what the blur analysis decided.
+        self.blur_tag = QLabel(self)
+        self.blur_tag.setGeometry(6, 30, 140, 20)
+        self.blur_tag.hide()
+
         # Centre: rejection marker. Deliberately loud, because rejecting is
         # the one action a photographer needs to be certain about at a glance.
         self.reject_tag = QLabel("REJECTED", self)
@@ -308,7 +317,7 @@ class ThumbnailCell(QLabel):
 
     def _raise_overlays(self) -> None:
         for overlay in (self.badge_label, self.label_tag, self.tech_label,
-                        self.web_checkbox, self.reject_tag):
+                        self.web_checkbox, self.reject_tag, self.blur_tag):
             overlay.raise_()
 
     def set_web_selected(self, checked: bool) -> None:
@@ -400,6 +409,23 @@ class ThumbnailCell(QLabel):
             self.badge_label.hide()
         if detail:
             self.set_badge(detail)
+
+    def set_blur_state(self, report) -> None:
+        """Show what the blur analysis found, if anything."""
+        self.blur_verdict = report.verdict
+        if report.is_blurry:
+            colour = "rgba(201,88,30,0.92)" if report.verdict == "motion_blur" else "rgba(120,80,160,0.92)"
+            text = "MOTION BLUR" if report.verdict == "motion_blur" else "OUT OF FOCUS"
+            self.blur_tag.setText(text)
+            self.blur_tag.setStyleSheet(
+                f"background: {colour}; color: white; border-radius: 6px;"
+                " padding: 2px 6px; font-size: 10px; font-weight: 700;"
+            )
+            self.blur_tag.show()
+            self.blur_tag.raise_()
+        else:
+            self.blur_tag.hide()
+        self.setToolTip(report.summary)
 
     def set_rejected(self, rejected: bool) -> None:
         """Mark this frame as rejected — excluded from the edit folder.
@@ -589,6 +615,7 @@ class MainWindow(QMainWindow):
         # Rejected == excluded from the -edit subfolder. Never a file delete.
         self.rejected: set[str] = set()
         self.last_cull_frames: list = []
+        self.blur_reports: dict = {}
         self.web_selected: set[str] = set()
         self.cells: dict[str, ThumbnailCell] = {}
         self.metadata: dict[str, ImageMetadata] = {}
@@ -767,7 +794,8 @@ class MainWindow(QMainWindow):
         sel_row.addWidget(QLabel("Show:"))
         self.view_filter = QComboBox()
         self.view_filter.addItems(
-            ["All", "Keepers only", "AI picks (starred)", "Duplicates", "Rejected"]
+            ["All", "Keepers only", "AI picks (starred)", "Duplicates",
+             "Rejected", "Blurry", "Motion blur", "Out of focus"]
         )
         self.view_filter.setToolTip("Filter which photos the grid shows.")
         self.view_filter.currentIndexChanged.connect(self._apply_view_filter)
@@ -831,6 +859,64 @@ class MainWindow(QMainWindow):
         cull_row.addWidget(self.xmp_reject_check)
         cull_row.addStretch()
         layout.addLayout(cull_row)
+
+        # --- Row 2b: blur triage ----------------------------------------- #
+        blur_row = QHBoxLayout()
+        blur_row.setSpacing(8)
+        blur_row.addWidget(QLabel("Blur:"))
+
+        self.find_blurry_button = QPushButton("Find Blurry")
+        self.find_blurry_button.setObjectName("SecondaryButton")
+        self.find_blurry_button.setToolTip(
+            "Scan for out-of-focus and motion-blurred frames, then stage "
+            "them in the rejected drawer for review. Nothing is deleted."
+        )
+        self.find_blurry_button.clicked.connect(self._on_find_blurry)
+        blur_row.addWidget(self.find_blurry_button)
+
+        blur_row.addWidget(QLabel("strictness"))
+        self.blur_strictness = QComboBox()
+        self.blur_strictness.addItems(["Aggressive", "Balanced", "Conservative"])
+        self.blur_strictness.setCurrentText("Balanced")
+        self.blur_strictness.setToolTip(
+            "Aggressive catches mild softness (good for reclaiming storage). "
+            "Conservative only flags frames that are clearly unusable."
+        )
+        blur_row.addWidget(self.blur_strictness)
+
+        self.sharpen_button = QPushButton("Sharpen Recoverable (0)")
+        self.sharpen_button.setObjectName("SecondaryButton")
+        self.sharpen_button.setEnabled(False)
+        self.sharpen_button.setToolTip(
+            "Sharpen only the frames whose blur is mild enough to lift. "
+            "Frames blurred past that point are not offered, because "
+            "sharpening them adds halos rather than restoring detail."
+        )
+        self.sharpen_button.clicked.connect(self._on_sharpen_recoverable)
+        blur_row.addWidget(self.sharpen_button)
+
+        blur_row.addSpacing(18)
+        blur_row.addWidget(QLabel("Straighten:"))
+        self.auto_level_button = QPushButton("Auto-Level Selected")
+        self.auto_level_button.setObjectName("SecondaryButton")
+        self.auto_level_button.setToolTip(
+            "Turn photos the right way up and level them, in one batch. "
+            "Which way is up comes from face detection; how far off level, "
+            "from the straight lines in the scene."
+        )
+        self.auto_level_button.clicked.connect(self._on_auto_level)
+        blur_row.addWidget(self.auto_level_button)
+
+        self.level_crop_check = QCheckBox("Crop corners")
+        self.level_crop_check.setChecked(True)
+        self.level_crop_check.setToolTip(
+            "Rotating leaves wedge-shaped gaps at the corners. Ticked, the "
+            "frame is cut back to the largest clean rectangle; unticked, the "
+            "gaps are left black. There is no generative fill."
+        )
+        blur_row.addWidget(self.level_crop_check)
+        blur_row.addStretch()
+        layout.addLayout(blur_row)
 
         # --- Row 3: grading ---------------------------------------------- #
         color_row = QHBoxLayout()
@@ -1264,6 +1350,174 @@ class MainWindow(QMainWindow):
         self._refresh_status()
 
     # ------------------------------------------------------------------ #
+    # Auto-levelling
+    # ------------------------------------------------------------------ #
+
+    def _on_auto_level(self) -> None:
+        """Straighten the selected photos, writing results to the edit folder.
+
+        Works on a batch, so a whole event can be normalised in one pass.
+        Which way up a frame goes is decided by face detection; how far from
+        level it is, by the straight lines in the scene. Head roll is not
+        used — the bundled face model cannot measure it (see
+        src/ai_tools/orientation.py for the numbers).
+        """
+        targets = self._drop_rejected(self._selected_paths(), "Auto-level")
+        if not targets:
+            QMessageBox.information(
+                self, "No selection", "Select the photos you want straightened."
+            )
+            return
+        if self.edit_folder is None:
+            QMessageBox.information(self, "No folder", "Load a folder first.")
+            return
+
+        edit_folder = self.edit_folder
+        loader = self.loader
+        crop = self.level_crop_check.isChecked()
+
+        def work():
+            from src.ai_tools.face_analysis import FaceAnalyzer
+
+            analyzer = FaceAnalyzer()
+            written, skipped = [], 0
+            for path in targets:
+                array = loader.load_array(path)
+                bgr = cv2.cvtColor(array, cv2.COLOR_RGB2BGR)
+                fixed, result = orientation.auto_rotate(bgr, analyzer=analyzer, crop=crop)
+                if not result.needs_rotation:
+                    skipped += 1
+                    continue
+                out_path = edit_folder / f"{Path(path).stem}_level.jpg"
+                cv2.imwrite(str(out_path), fixed, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                written.append((out_path, result))
+            return written, skipped
+
+        def done(outcome):
+            written, skipped = outcome
+            if not written:
+                self.status_label.setText(
+                    f"All {skipped} selected photo(s) were already upright — nothing written."
+                )
+                return
+            turns = sum(1 for _, r in written if r.coarse)
+            detail = f"{turns} needed a quarter turn; " if turns else ""
+            self.status_label.setText(
+                f"Straightened {len(written)} photo(s) into {edit_folder.name}/ as "
+                f"*_level.jpg ({detail}{skipped} already upright). Originals untouched."
+            )
+
+        self._run_task(work, done, self.auto_level_button)
+
+    # ------------------------------------------------------------------ #
+    # Blur analysis -- find unusable frames, and rescue the ones worth it
+    # ------------------------------------------------------------------ #
+
+    def _on_find_blurry(self) -> None:
+        """Scan the folder for blurred frames and stage them for review.
+
+        Blurry frames are marked rejected rather than deleted, so they land
+        in the same review drawer as anything else rejected and can be put
+        back one by one. Nothing is removed from disk at any point.
+        """
+        if not self._require_library():
+            return
+        strictness = self.blur_strictness.currentText().lower()
+        paths = list(self.image_paths)
+        self.status_label.setText(
+            f"Checking {len(paths)} photo(s) for blur ({strictness})…"
+        )
+
+        def work():
+            return blur_analysis.analyze_many(paths, strictness=strictness)
+
+        def done(reports):
+            self.blur_reports = reports
+            blurry, recoverable = [], []
+            for path, report in reports.items():
+                cell = self.cells.get(path)
+                if cell is not None:
+                    cell.set_blur_state(report)
+                if report.is_blurry:
+                    blurry.append(Path(path))
+                    if report.recoverable:
+                        recoverable.append(path)
+
+            if blurry:
+                self._set_rejected(blurry, True)
+
+            motion = sum(1 for r in reports.values() if r.verdict == blur_analysis.MOTION_BLUR)
+            defocus = sum(1 for r in reports.values() if r.verdict == blur_analysis.OUT_OF_FOCUS)
+            soft = sum(1 for r in reports.values() if r.verdict == blur_analysis.SOFT)
+
+            self.status_label.setText(
+                f"{len(blurry)} blurred of {len(paths)} "
+                f"({motion} motion, {defocus} out of focus, {soft} slightly soft). "
+                f"They are marked rejected, not deleted — open “Review Rejected” "
+                f"to look through them."
+                + (
+                    f"  {len(recoverable)} may be rescued by sharpening."
+                    if recoverable
+                    else ""
+                )
+            )
+            self._refresh_sharpen_button()
+
+        self._run_task(work, done, self.find_blurry_button)
+
+    def _refresh_sharpen_button(self) -> None:
+        if not hasattr(self, "sharpen_button"):
+            return
+        count = sum(1 for r in self.blur_reports.values() if r.recoverable)
+        self.sharpen_button.setText(f"Sharpen Recoverable ({count})")
+        self.sharpen_button.setEnabled(count > 0)
+
+    def _on_sharpen_recoverable(self) -> None:
+        """Sharpen the frames whose blur is mild enough to be worth lifting.
+
+        Only frames the analysis marked recoverable are offered, because
+        sharpening something past that point adds halos to mush rather than
+        bringing detail back — the Laplacian score rises either way, which
+        is exactly why the score alone does not decide this.
+        """
+        if self.edit_folder is None:
+            QMessageBox.information(self, "No folder", "Load a folder first.")
+            return
+        targets = [p for p, r in self.blur_reports.items() if r.recoverable]
+        if not targets:
+            QMessageBox.information(
+                self,
+                "Nothing to rescue",
+                "No frames are in the window where sharpening helps.\n\n"
+                "Frames blurred past that point cannot have detail restored, "
+                "so no fix is offered for them.",
+            )
+            return
+
+        edit_folder = self.edit_folder
+        loader = self.loader
+
+        def work():
+            written = []
+            for path in targets:
+                array = loader.load_array(path)
+                bgr = cv2.cvtColor(array, cv2.COLOR_RGB2BGR)
+                fixed = blur_analysis.sharpen(bgr, strength=1.0)
+                out_path = edit_folder / f"{Path(path).stem}_sharpened.jpg"
+                cv2.imwrite(str(out_path), fixed, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                written.append(out_path)
+            return written
+
+        def done(written):
+            self.status_label.setText(
+                f"Sharpened {len(written)} frame(s) into {edit_folder.name}/ as "
+                f"*_sharpened.jpg. Originals untouched. This lifts edge contrast; "
+                f"it does not reconstruct detail that was never captured."
+            )
+
+        self._run_task(work, done, self.sharpen_button)
+
+    # ------------------------------------------------------------------ #
     # Selection
     # ------------------------------------------------------------------ #
 
@@ -1405,6 +1659,15 @@ class MainWindow(QMainWindow):
             return bool(cell and cell.starred)
         if mode == "Duplicates":
             return bool(cell and cell.duplicate)
+        if mode == "Blurry":
+            report = self.blur_reports.get(path)
+            return bool(report and report.is_blurry)
+        if mode == "Motion blur":
+            report = self.blur_reports.get(path)
+            return bool(report and report.verdict == blur_analysis.MOTION_BLUR)
+        if mode == "Out of focus":
+            report = self.blur_reports.get(path)
+            return bool(report and report.verdict == blur_analysis.OUT_OF_FOCUS)
         return True
 
     def _apply_view_filter(self) -> None:
@@ -1470,6 +1733,7 @@ class MainWindow(QMainWindow):
         self.selected.clear()
         self.rejected.clear()
         self.last_cull_frames = []
+        self.blur_reports = {}
         self.web_selected.clear()
         self.metadata.clear()
         self.labels.clear()
