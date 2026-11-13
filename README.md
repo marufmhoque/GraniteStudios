@@ -12,12 +12,15 @@ and installs it for you. Re-run the same file any time to update.
 
 **Local-first AI photo and video editing suite** for photographers and content creators. Designed to run smoothly on modest hardware (i5-8350U + 32GB RAM), but scales to powerful machines with CUDA or Apple Silicon.
 
-- 📸 **Universal input**: RAW (Nikon, Canon, Sony, etc.), HEIC, JPEG, PNG, and more
-- 🤖 **Smart culling**: Perceptual-hash duplicate detection, burst grouping, sharpness scoring
-- 🎨 **AI color grading**: Selective color isolation, cinematic matrix filters, one-click auto-edit
-- 📹 **Reel maker**: Turn 3–7 images into a scrolling 9:16 panoramic video
-- 🌐 **Web publisher**: Responsive Masonry gallery with category tabs and camera metadata
-- 💾 **Edit-safe workflow**: Edits and "keepers" are written to an `-edit` subfolder; your originals are never modified or moved
+Six workspaces over one folder: **Cull**, **Develop**, **Retouch**, **Design**, **Export** and **Video**.
+
+- 📸 **Universal input**: ten camera RAW formats, phone DNG, HEIC (including 10-bit), Ultra HDR, Motion Photos, Live Photos, JPEG, PNG, TIFF, and ProRes/DNxHD video
+- ⚡ **Fast culling**: 1,000 camera RAWs scored for focus, duplicates, blinks and smiles in **42–104 seconds** on an i5-8350U laptop ([measured](#a-note-on-the-performance-target))
+- 👁️ **Faces**: a 478-point face mesh measures each eye's aspect ratio and each smile; faces are grouped by person, entirely on your computer
+- 🎚️ **Develop**: a 16-bit, float develop engine with tone, curves, HSL, colour grading, dehaze, lens profiles, LUTs, straighten and keystone
+- 🖌️ **Retouch**: layers with seven blend modes, AI masks (subject, skin, teeth, eyes, sky…), healing, cloning, skin smoothing that keeps pores, and inpainting that fills straightened corners
+- ✍️ **Design**: vector text, shapes and watermarks that print sharp at any size and export to SVG and PDF
+- 💾 **Non-destructive**: every edit is a small settings file. Nothing is rendered until you export, and your originals are never modified, moved or deleted
 
 ## Quick Start
 
@@ -108,155 +111,154 @@ architecture and deployment steps.
 
 ## Features
 
+### The six workspaces
+
+The bar across the top switches between them (**Ctrl+1** to **Ctrl+6**). They
+all look at the same open folder: a selection, rating or rejection made in one
+is seen in all of them, and the editing workspaces show the folder as a
+filmstrip along the bottom.
+
+| Workspace | What it is for |
+| --- | --- |
+| **Cull** | The grid. AI cull, blur triage, auto-levelling, ratings and labels, rejecting, survey and face loupe, grouping by person |
+| **Develop** | One frame, every tone and colour setting, live preview, before and after |
+| **Retouch** | Layers and masks, healing and cloning, skin, teeth and eyes |
+| **Design** | Text, shapes and watermarks over the finished frame |
+| **Export** | Everything that writes files: presets, watermarks, Instagram, reels, web gallery, background removal |
+| **Video** | The FFmpeg video editor |
+
+### Cull
+
+- **Keyboard first.** Arrows move; **1–5** set stars (0 clears); **6–9** set red, yellow, green, blue labels; **P** picks, **X** rejects, **U** clears both; **Enter** opens the frame in Develop. Marks apply to the selection, or to the current frame when nothing is selected, and are saved in the edit folder so they are there next time
+- **Smart cull** decodes each file once. For a RAW that is the camera's own embedded JPEG, not a full development of the sensor data; sharpness, a duplicate fingerprint, the capture time and every face are all measured from that one decode, on all your cores
+- **The keeper score** ranks frames inside each burst: sharpness *of the faces* (40%), eyes open (35%), smile (15%) and a simple composition check (10%). A frame focused on the wall behind someone no longer wins. Frames with no people are ranked on overall sharpness
+- **Cull to target**: say how many keepers you want ("the best 400 of these 3,000"); the quota is spread across bursts so no part of the day is dropped wholesale
+- **Survey (S)** puts 2–6 selected frames side by side with zoom and pan locked together. **Face Loupe (F)** shows every face in the selection at full size, to check focus and eyes
+- **Group by Person** recognises faces across the folder and groups photographs by who is in them, so you can show only one person's frames and name them ("Bride"). It all happens on your computer; **Forget Faces** deletes the stored face data
+- **XMP sidecars** carry ratings and labels to Lightroom Classic, Capture One, Photo Mechanic and Bridge, merging with whatever those tools already wrote
+
 ### Blur triage
-- **Find Blurry** scores every frame and separates *motion blur* from *missed focus*: a smear destroys detail along one axis, so the gradients bunch in one direction, whereas defocus softens every direction equally. Motion direction is reported too (±15° across 15 synthetic test cases)
-- **Strictness** — *Aggressive* catches mild softness for reclaiming storage, *Conservative* only flags clearly unusable frames
+- **Find Blurry** separates *motion blur* from *missed focus*: a smear destroys detail along one axis, defocus softens every direction equally. Motion direction is reported too (±15° across 15 synthetic test cases)
+- **Strictness** — *Aggressive* catches mild softness, *Conservative* only flags clearly unusable frames
 - Blurry frames are **marked rejected, not deleted**, so they land in the same review drawer and can be put back
-- **Sharpen Recoverable** is offered only for frames with detail left to lift. Past that point sharpening adds halos rather than restoring detail — the Laplacian score rises either way, which is exactly why the score alone does not decide it
+- **Sharpen Recoverable** is offered only for frames with detail left to lift, and adds sharpening to their edits rather than writing new files
 
 ### Auto-levelling
-- **Auto-Level Selected** straightens a whole batch in one pass. Two engines run, because neither covers every photograph
-- *Which way up* comes from face detection — a detector will not fire on an upside-down face, so each quarter turn is tried. All 90/180/270 turns were recovered correctly
-- When no face is visible (a subject facing away, a face too small), the **body** answers instead: the direction from the hips to the shoulders is read straight off the pose landmarks and rounded to a quarter turn. With the face engine switched off entirely, all four turns were still recovered
-- *How far off level* comes from the straight lines in the scene. Round-tripping known tilts leaves **under 1° residual**
-- When the frame has no usable lines — a portrait against a plain wall — the **shoulder and hip lines** carry it instead. Over a ±14° sweep that left **0.6° mean error, 1.7° worst**
-- Lines are preferred over the body wherever there are any: lines measure the camera against the world, whereas a person can genuinely be leaning. In practice the two rarely compete — the test portraits yielded no usable lines at all, and the frames with strong lines had no usable body
-- **Use body** is optional and needs a one-off ~17 MB model download, which the app asks about before fetching. Everything is verified against a pinned fingerprint and nothing is uploaded
-- **Check Posture** reports what the subjects are doing — how much of the body is in frame, whether the camera was rolled, whether the subject is leaning — and changes nothing
-- Rotating leaves wedge corners; **Crop corners** cuts back to the largest clean rectangle, or leave it off to keep them black. There is no generative fill
-- **Head roll is still deliberately not used.** See the caveat below
+- **Auto-Level Selected** straightens a batch by setting each frame's rotation. Two engines run, because neither covers every photograph
+- *Which way up* comes from face detection — a detector will not fire on an upside-down face, so each quarter turn is tried — and from the **body** when no face is visible (hips-to-shoulders direction). All 90/180/270 turns were recovered, with or without the face engine
+- *How far off level* comes from the straight lines in the scene (**under 1° residual** on known tilts), or from the **shoulder and hip lines** when the frame has none (**0.6° mean, 1.7° worst** over ±14°)
+- **Corners**: *Crop* cuts back to the largest clean rectangle; *Fill* paints the corners in at export so the full frame is kept; *Leave black* does neither
+- **Check Posture** reports how much of each body is in frame, whether the camera was rolled and whether the subject is leaning, and changes nothing
+- **Head roll is still deliberately not used to level.** See the caveat below
 
 ### Reviewing and rejecting
-- **Select All / None / Invert**, scoped to whatever the view filter is showing — selecting frames you cannot see would be a trap
-- **Reject Selected** marks photos as out. **Rejected never means deleted:** the original file is never moved, renamed or removed. It simply stops being copied into the `-edit` subfolder
-- **Review Rejected** opens every rejected frame as thumbnails before anything is acted on, with a tick per photo so you can put any of them back
-- **Reject Non-Picks** rejects everything a cull did not choose, in one click, reversibly
-- **Show:** filters the grid to *Keepers*, *AI picks*, *Duplicates* or *Rejected*, so you can actually see what the cull decided instead of reading it in a report
+- **Select All / None / Invert**, scoped to whatever the view filter is showing
+- **Rejected never means deleted.** The original file is never moved, renamed or removed; it is simply left out of every export
+- **Review Rejected** shows every rejected frame before anything is acted on, with a tick per photo to put it back
+- **Show:** filters the grid to *Keepers*, *AI picks*, *Duplicates*, *Rejected*, *Blurry*, *Motion blur* or *Out of focus*, and to one person after **Group by Person**
 
-### Library & Culling
-- **Universal loader**: One-click folder import. Embedded RAW thumbnails cached for instant preview scrolling
-- **Smart cull**: Laplacian-variance sharpness scoring + timestamp-based burst grouping. Auto-stars the top 2 sharpest of each burst
-- **Blink detection**: YuNet (OpenCV's DNN face detector) finds faces, then each eye is scored for openness. With **Skip blinks** enabled, an open-eyed frame outranks a *sharper* one where everybody blinked — a crisp photo of closed eyes is not a keeper. Degrades to sharpness-only if the model can't be fetched
-- **Cull to target**: Say how many keepers you want ("the best 400 of these 3,000") instead of guessing at a sharpness threshold. The quota is spread across bursts, so a sharp stretch of the day cannot swallow the whole selection and leave other moments unrepresented
-- **XMP sidecar export**: Writes star ratings and colour labels to `.xmp` files beside each image, so Lightroom Classic, Capture One, Photo Mechanic and Bridge open the folder with your picks already applied. Existing sidecars are *merged*, never overwritten — another tool's develop settings, keywords and crops survive. Originals are never modified
-- **Metadata overlays**: Camera, lens, ISO, aperture, shutter speed displayed on hover
+### Develop
+- **Basic**: exposure, contrast, highlights, shadows, whites, blacks, temperature, tint, texture, clarity, dehaze, vibrance, saturation
+- **Tone curve** for the whole image and per channel, drawn over the histogram
+- **Colour**: eight-band HSL (hue, saturation, luminance), three-way colour grading (shadows, midtones, highlights) with balance and blending
+- **Looks and LUTs**: the six original grades as adjustable looks, and any 3D `.cube` LUT, each with a strength slider
+- **Detail**: sharpening and noise reduction. **Lens**: automatic distortion, colour-fringe and vignetting correction from the lens database when the camera and lens are known, manual sliders when not
+- **Crop and straighten**: quarter turns, flip, straighten, vertical and horizontal keystone, aspect crops
+- **Before / After (\\)**, **clipping view (J)** showing lost shadows in blue and blown highlights in red, a live RGB histogram, **undo and redo** (Ctrl+Z / Ctrl+Y), **copy and paste settings**, and **Sync** to copy the settings to every selected frame (crops and retouching stay with their own photo)
+- RAW files develop from 16-bit linear sensor data in 32-bit float. Highlights roll off rather than clip when exposure is pushed
 
-### Color & Grading
-- **Selective color**: Isolate one hue (e.g., "red dress") and desaturate everything else
-- **Cinematic filters**: 6 matrix-based grades (teal-orange, bleach bypass, noir, etc.) with lift/gamma tone curves
-- **Smart auto-fix**: One-click white-balance + CLAHE histogram equalization for web readiness
+### Retouch
+- **Layers** with opacity and seven blend modes (normal, multiply, screen, overlay, soft light, colour dodge, luminosity), shown in a panel you can reorder and hide
+- **Adjustment layers** limited by a mask: **AI** (subject, background, person, skin, teeth, eyes, iris, lips; hair and sky are approximate and labelled so), **click-to-select** an object, a **gradient**, or one you **paint** with the brush
+- **Heal** removes blemishes and dust with a click; **Clone** copies a patch from one place to another. Both are stored as positions, so they render at full resolution on export
+- **Smooth Skin** evens out blotches while keeping pores (frequency separation, measured on the texture bands); **Whiten Teeth** takes out the yellow without making them glow; **Brighten Eyes** adds clarity to the irises
 
-### Web Workflow
-- **Edit-safe subfolder**: Load `Vacation2024` → all edits save to `Vacation2024-edit` → originals stay pristine
-- **Selective publishing**: Check "Publish to Web" on individual thumbnails. Only checked images export
-- **Labeled galleries**: Assign categories (Graduation, Nature, Travel, etc.) to thumbnails, rendered as category tabs in the published HTML
-- **Gallery naming**: Custom title for each batch you export
-- **Keeper JPEG export**: RAW files are automatically flattened to JPEG in the edit folder on first export (idempotent, so repeated calls are instant)
+### Design
+- **Text** in any installed font with size, bold, italic, kerning, tracking, leading, alignment, outline and drop shadow; **rectangles** (with rounded corners), **ellipses**, **stars** and **bezier paths**
+- **Watermarks**: a signature, a round photographer's seal, and a strip that fills in each photo's own camera, lens and exposure from `{camera}`, `{lens}`, `{settings}`, `{date}` tokens
+- **Snap** to a grid, with guide lines when an item lines up with another or with the middle of the frame
+- **Export SVG** (the design alone, as vector) or **Export PDF** (the photograph with the design, as a print page)
 
-### Instagram & Social
-- **Panoramic reels**: 3–7 images stitched into a massive panorama, with a 1080×1920 viewport sliding left-to-right over 10 seconds (MP4)
-- **IG formatting**: Auto-pad any image to exact 4:5 (feed) or 9:16 (story) with a blurred, darkened background
+### Export
+- **Presets**: Web JPEG (2048 px), full-size JPEG, 16-bit TIFF, print at 300 dpi, 16-bit PNG — each rendering every selected frame with its edits, layers and overlays
+- **Batch watermark** with any of the three templates, filled in per photograph
+- **Instagram** 4:5 feed and 9:16 story, the **panoramic reel**, the **static web gallery** with category tabs, and **background removal** to transparent PNG all use the edited version of each frame
+- Rejected frames are always left out
 
-### Background Removal
-- **AI segmentation**: One-click background removal via `rembg` (U2Net ONNX model), CPU-friendly and GPU-independent
-- **Transparent PNG export**: Outputs `*_nobg.png` (RGBA) to the edit folder, ready for compositing
-
-### Video Editor
-A full FFmpeg + OpenCV video engine, ships its own FFmpeg binary (`imageio-ffmpeg`) so it works with no system install:
-- **Timing**: trim, reverse, freeze-frame, constant/ramped speed changes, time-lapse condensation (e.g. a 30-minute file → a 30-second highlight)
-- **Framing**: aspect-ratio conversion (16:9/9:16/1:1/4:5/4:3, crop or letterbox), explicit bounding-box crop, subject-aware auto-crop (Haar-cascade face detection with a center-crop fallback), OpenCV point-feature stabilization, static-region redaction
-- **Structure**: split/trim, multi-clip concat, crossfade/wipe transitions (`xfade`/`acrossfade`), J-cut/L-cut audio offsetting
-- **Audio**: track mixing, EBU R128 loudness normalization, sidechain auto-ducking, FFT noise reduction (`afftdn`), volume adjustment
-- **Color**: brightness/contrast/saturation/gamma correction, temperature-based white balance, 3D LUT (`.cube`) application
-- **Export presets**: Web MP4 (H.264/faststart), high-quality MOV, WebM (VP9/Opus), Instagram Reel (1080×1920)
-- **Universal ingestion**: MP4, MOV, AVI, MKV, WebM, FLV — any container/codec FFmpeg can decode
-- **Local REST API**: optional FastAPI server (`src/video/api.py`, toggled from the Video Editor tab) exposes `/probe`, `/jobs`, `/concat`, `/transition` so external scripts can drive the engine over HTTP
-- **Hardware-sized job pool**: multi-step pipelines run through a background thread pool sized to leave CPU headroom, matching the same conservative philosophy as the photo side's RAM budgeting
+### Phones and video
+- **HEIC** at its full bit depth; **Ultra HDR** gain maps read and applied; **Motion Photo** clips found and extracted; **Live Photo** stills paired with their clips; ProRAW DNGs are recognised (their tone-map table is not yet applied — see the PRD)
+- The **Video** workspace is the full FFmpeg editor: trim, speed, reverse, time-lapse, reframe, stabilise, crop, redact, concat, transitions, J/L cuts, loudness, ducking, denoise, colour and LUTs, four export presets and an optional local REST API. Ingests MP4, MOV, MKV, WebM, AVI and ProRes / DNxHD, and ships its own FFmpeg
 
 ## Hardware Support
 
-Granite Studios detects your hardware and picks the best engine:
-- **Nvidia GPU** (CUDA): Full acceleration for RAW demosaicing and ML inference
-- **Apple Silicon** (M1/M2/M3): CoreML/MPS for native performance
-- **Intel iGPU** (integrated graphics): OpenVINO inference
-- **CPU fallback**: Works everywhere, just slower
+AI models that run through ONNX Runtime use the best accelerator the machine has:
 
-RAM is automatically profiled at startup. Large operations (batch exports) are sized conservatively to never starve the OS.
+- **Windows**: DirectML, on any DirectX 12 graphics card (Intel, AMD or NVIDIA), no vendor install needed
+- **macOS**: Core ML (Apple Neural Engine)
+- **Elsewhere**: CUDA or OpenVINO when present
+- **CPU** always works, and is used automatically if the accelerator will not start
+
+Measured on Intel UHD 620 integrated graphics: background removal **1.36× faster** on DirectML, with output matching the CPU to within one level in 255. The very first run on a machine takes about a minute while the graphics driver prepares; after that it starts in under a second. The face, pose, mesh, segmentation and inpainting models run through OpenCV on the CPU and are unaffected.
+
+RAM is profiled at startup and batch work is sized so it never starves the system.
 
 ## Project Structure
 
 ```
 .
-├── main.py                    # Entry point: splash screen, hardware diagnostics, shortcut creation
-├── requirements.txt           # Python dependencies
+├── main.py                       # Entry point: splash screen, diagnostics, shortcuts
 ├── src/
 │   ├── engine/
-│   │   ├── hardware.py       # GPU/CPU detection, RAM profiling
-│   │   ├── universal_loader.py # RAW/HEIC/JPEG loader, edit-subfolder management
-│   │   ├── resources.py      # Frozen-bundle path resolution (sys._MEIPASS)
-│   │   └── create_shortcut.py # First-run Desktop/Start Menu shortcuts
+│   │   ├── fast_preview.py       # Embedded RAW previews, reduced and greyscale decodes
+│   │   ├── universal_loader.py   # Formats, EXIF, edit folders
+│   │   ├── phone_media.py        # Ultra HDR, Motion/Live Photos, deep HEIC
+│   │   ├── parametric_recipe.py  # The edit recipe and its sidecar files
+│   │   ├── develop_pipeline.py   # Float develop engine, geometry, lens, LUTs, export
+│   │   ├── layer_stack.py        # Layers, masks, blend modes, heal and clone
+│   │   ├── export_presets.py     # Export presets and batch rendering
+│   │   ├── session.py            # The open folder, shared by every workspace
+│   │   └── hardware.py           # Accelerator selection, RAM budgets
 │   ├── ai_tools/
-│   │   ├── culling.py        # Sharpness scoring, burst grouping, perceptual hashing
-│   │   ├── color_engine.py   # Selective color, cinematic filters, auto-edit
-│   │   └── background_removal.py # AI background removal (rembg / U2Net)
-│   ├── social/
-│   │   ├── reel_maker.py     # Panoramic video stitcher (moviepy)
-│   │   └── ig_sync.py        # Instagram feed/story formatter
-│   ├── web/
-│   │   └── publisher.py      # Static Tailwind gallery generator
-│   ├── video/                # FFmpeg + OpenCV video editing engine
-│   │   ├── ffmpeg_utils.py   # Bundled-ffmpeg resolution, probing, subprocess wrapper
-│   │   ├── normalize.py      # fps/sample-rate/resolution normalization pass
-│   │   ├── timing.py         # Trim, reverse, freeze-frame, speed ramp, time-lapse
-│   │   ├── spatial.py        # Aspect conversion, crop, auto-crop, stabilization
-│   │   ├── structure.py      # Split, concat, transitions, J/L cuts
-│   │   ├── audio.py          # Mixing, loudness norm, auto-duck, denoise
-│   │   ├── color.py          # Color correction, 3D LUT application
-│   │   ├── export.py         # Container/codec/bitrate export presets
-│   │   ├── pipeline.py       # VideoJob/JobManager — multi-step async pipelines
-│   │   └── api.py            # Optional local FastAPI REST server
-│   └── ui/
-│       └── main_window.py    # PyQt6 dark-theme professional interface
-├── web/                      # Browser version (see web/README.md)
-│   ├── backend/              # FastAPI service wrapping src/ engines (Docker → Render)
-│   └── frontend/             # React + Vite + Tailwind UI (→ Vercel)
-├── render.yaml               # Render blueprint for the web backend
-├── package_windows.py        # PyInstaller builder for .exe (Pillow icon conversion)
-└── .github/workflows/build.yml # CI: macOS .dmg builder
+│   │   ├── culling.py            # One-pass scoring, keeper score, bursts, target cull
+│   │   ├── face_analysis.py      # YuNet face detection
+│   │   ├── face_mesh.py          # 478-point mesh: eye aspect ratio, smile, head roll
+│   │   ├── person_clustering.py  # Face recognition and grouping by person
+│   │   ├── segmentation.py       # Subject, skin, teeth, eyes, sky, click masks
+│   │   ├── retouch.py            # Skin, teeth, eyes, healing, inpainting
+│   │   ├── blur_analysis.py, orientation.py, pose_analysis.py
+│   │   ├── color_engine.py, background_removal.py, xmp_sidecar.py
+│   │   └── model_store.py        # Pinned, verified model downloads
+│   ├── graphics/vector_canvas.py # Text, shapes, watermarks; raster, SVG, PDF
+│   ├── ui/
+│   │   ├── main_window.py        # The workspace bar
+│   │   ├── workspaces/           # cull, develop, retouch, design, export, video
+│   │   └── widgets/              # canvas, histogram, curves, filmstrip, renderer
+│   ├── social/, web/, video/     # Reels and Instagram, web gallery, video engine
+├── tests/                        # pytest suite (see Testing)
+├── web/                          # Browser version (see web/README.md)
+└── install/, package_windows.py  # Installer and packaging
 ```
 
 ## Usage Workflow
 
-> **One pane, not three.** Import, culling, rejection and grading all happen
-> on the **Photos** page against a single grid that stays on screen. They used
-> to be three separate tabs, which hid the photographs at exactly the moment
-> you needed to see what an action had done.
+### 1. Cull
+- **Load Folder** (top right). A `<FolderName>-edit` subfolder is created for everything the app writes
+- **Select Top N** with *Skip blinks* to pick keepers, or **Run Smart Cull** to star the best of each burst. Rate and label with the keyboard; **Survey** and **Face Loupe** to compare
+- **Reject Non-Picks**, then **Review Rejected** to check before anything is left out
 
-### 1. Load & Cull
-- Click **Load Folder** on the Photos page
-- Edit subfolder `<FolderName>-edit` is created automatically
-- Run **Smart Cull** to score sharpness and group similar frames → stars the best of each burst
+### 2. Develop and retouch
+- Double-click a frame (or press **Enter**) to open it in **Develop**; arrow keys move through the folder
+- **Sync** your settings to the rest of the selection
+- **Retouch** for skin, teeth, eyes, spots and local adjustments
 
-### 2. Grade & Edit
-- Select images, choose a **Cinematic Filter** or **Selective Color** mode
-- Click **Apply to Selected** → graded `*_graded.jpg` files land in the edit folder
-- Or use **Auto-Edit** on export for instant white-balance + contrast
+### 3. Design
+- Add a watermark or caption; it is drawn over the final, cropped frame at export
 
-### 3. Publish to Web
-- Check "**Publish to Web**" on the thumbnails you want to include
-- Assign **Labels** (Graduation, Nature, etc.) for category tabs
-- Enter a **Gallery Name** (e.g., "Vacation 2024 Highlights")
-- Click **Generate Gallery** → responsive HTML + images ready to upload to any web host
+### 4. Export
+- Choose a **preset** and optional **watermark**, then **Export Selected**. Or make an Instagram set, a reel, or a web gallery from the same edits
 
-### 4. Export Socials
-- **Reel Maker**: Select 3–7 images → choose where to save → outputs a 1080×1920 MP4 panoramic scroll (selecting fewer than 3 or more than 7 is rejected)
-- **IG Formatter**: Select images → choose an export folder → each is padded to exactly 1080×1350 (feed) or 1080×1920 (story) over a blurred, darkened copy of itself
-
-### 5. Edit Video
-- Click **Load Video** in the Video Editor tab (any MP4/MOV/AVI/MKV/WebM/FLV file)
-- Run operations in any order — trim, speed, reframe, stabilize, color-correct, denoise. Each one saves into `<video-name>-edit/` and becomes the input to the next, so they chain; **Reset to Original** starts over
-- Pick an **Export preset** and click **Export** — Web MP4 (H.264, faststart, capped at 1920 wide), MOV (high-quality H.264), WebM (VP9/Opus), or Instagram Reel, which fits and pads the clip to exactly 1080×1920 whatever the source shape
-- Optionally click **Start Local API Server** to drive the same engine from an external script over HTTP (`http://127.0.0.1:8756/docs`)
+### 5. Video
+- **Load Video** in the Video workspace and chain operations; each saves into `<video-name>-edit/`, and **Reset to Original** starts over
 
 ## Development
 
@@ -277,37 +279,26 @@ pyinstaller main.py --name "Granite Studios" --windowed --onedir \
 ```
 
 ### Testing
-There is no automated test suite yet. Verification is done by exercising the
-real engines against generated media, and by driving the PyQt6 window itself
-with `QT_QPA_PLATFORM=offscreen` so every button's handler runs headlessly.
 
-What that covers today:
+```bash
+pip install pytest
+python tests/fetch_media.py   # optional: CC0 camera RAW samples and reference faces, ~190 MB
+pytest
+```
 
-| Area | Verified |
-| --- | --- |
-| `hardware.py` | RAM profiling; export budget = half available, capped at 8GB |
-| `universal_loader.py` | Folder scan, RAW/HEIC/JPEG/PNG support, preview + array decode, EXIF, `-edit` folder creation |
-| `culling.py` | Sharpness ranks sharp above blurred; perceptual hash flags near-duplicates; burst grouping |
-| `color_engine.py` | All 6 cinematic filters; all 8 selective-colour hues (isolated hue stays saturated, rest goes mono); auto-fix; brightness/contrast/saturation |
-| `background_removal.py` | Returns RGBA at source size with a non-uniform alpha channel |
-| `ig_sync.py` | Exact 1080×1350 feed and 1080×1920 story output |
-| `reel_maker.py` | 1080×1920 MP4 at the requested duration; rejects fewer than 3 or more than 7 images |
-| `publisher.py` | Category tabs, custom title, responsive masonry, images emitted |
-| `xmp_sidecar.py` | Ratings 0-5 and -1 round-trip; all five Lightroom labels; clamping; **merge preserves another tool's `crs:` develop settings, `dc:title` and keywords**; a corrupt sidecar degrades instead of raising; batch write over a real cull |
-| `cull_to_target` | Quota spread evenly across bursts, picks each burst's sharpest first; clamps above the image count; rejects a negative target |
-| `create_shortcut.py` | Writes a `.lnk` whose argument is quoted, targets `pythonw.exe`, and launches successfully from a path containing a space |
-| `blur_analysis.py` | Sharp frames not flagged across 3 reference images; defocus classified correctly at 2 blur radii each; **15/15 motion cases detected with direction within 15°**; strictness levels verified to change the verdict on the same frame; the rescue gate refuses frames past recovery |
-| `orientation.py` | Upright frames left alone; **all 90/180/270 turns recovered** (and still recovered with the face engine disabled, using the body); known tilts round-tripped to under 1° residual; blank padding no longer read as scene structure; crop leaves no black corners; batch skips already-level frames |
-| `pose_analysis.py` | Landmarks verified against the image (skeleton lands on the body); **body tilt tracks a known roll 1:1 across ±24°**; levelling a full-body frame leaves **0.53° mean / 1.33° worst** residual; shoulders-only leaves 2.90° / 9.54° and is therefore never applied; a half-out-of-frame body is refused rather than guessed; deterministic across repeat runs; degrades to lines-only with the models absent |
-| `model_store.py` | Pinned digests reject a substituted or truncated download; a cached model that fails verification is refetched; a missing model disables its feature instead of raising |
-| `face_analysis.py` | Model download checksum-pinned and verified; detects two real faces and **no false positives** across six non-face sample images; stable from 0.4x to 2x scale; grayscale, RGBA, empty and `None` inputs; landmarks mapped back to full-resolution coordinates after downscaling; **degrades to unavailable rather than raising when the model is absent** |
-| blink-aware culling | With eye checking off, the sharpest frame wins even with closed eyes; with it on, the same burst picks the softer open-eyed frame instead — verified on bursts built so sharpness and open eyes disagree |
-| `video/` | Every timing, spatial, structure, audio, and colour operation; all 4 export presets; `.cube` LUT; multi-step `JobManager` pipelines including the failure path |
-| `video/api.py` | `/probe`, `/jobs`, `/jobs/{id}`, `/concat`, `/transition`, plus 400/404 handling |
-| `ui/main_window.py` | Window construction, folder load, video load, all ten video operations chained through their real handlers, plus **Select Top N**, **Skip blinks** and **Write XMP Sidecars** driven through their real handlers |
+**493 tests.** They drive the real engines and the real window (headless,
+with `QT_QPA_PLATFORM=offscreen`); nothing is mocked except file dialogs.
+Tests that need a downloaded model or sample file are marked `model` or
+`media` and skip themselves when it is absent.
 
-Contributions that add a proper `pytest` suite are very welcome — see
-[Contributing](#contributing).
+The first file, `tests/test_invariants.py`, hashes every original before and
+after each action that reads the library (cull, reject, blur triage, grade,
+level, sidecars, export, background removal, Instagram, reel, gallery, video)
+and fails on any change, and checks that a rejected frame never reaches an
+export. Every new feature extends it.
+
+`tests/bench_cull.py` times a 1,000-frame cull per camera and records the
+results in its docstring.
 
 ### Key Dependencies
 - **PyQt6**: Desktop UI (dark theme, fade transitions, hardware info display)
@@ -318,34 +309,38 @@ Contributions that add a proper `pytest` suite are very welcome — see
 - **moviepy**: Reel rendering
 - **rembg**: AI background removal (U2Net ONNX model)
 - **imageio-ffmpeg**: Bundled FFmpeg binary for the video engine — no system install required
+- **onnxruntime-directml** (Windows) / **onnxruntime**: AI model runtime
+- **lensfunpy**: Lens distortion, fringe and vignetting profiles
+- **scipy, tifffile**: Curve interpolation; 16-bit TIFF export
 - **fastapi / uvicorn**: Optional local REST API for the video engine
 - **psutil**: RAM and CPU core detection
 
 ## Architecture Highlights
 
 ### Edit-Safe Workflow
-Loading a folder creates an `-edit` folder *inside* it, named after the folder,
-and edits land there instead of next to your originals:
+Loading a folder creates an `-edit` folder *inside* it. Your edits are
+**settings**, kept there as small files; nothing is rendered until you export:
 
 ```
-Vacation2024/                 # your originals — never modified or moved
+Vacation2024/                       # your originals — never modified or moved
 ├── DSC_0001.NEF
 ├── DSC_0002.NEF
-└── Vacation2024-edit/        # created on load
-    ├── DSC_0001_graded.jpg   # cinematic filter / selective colour / auto-fix
-    ├── DSC_0002_nobg.png     # background removal
-    └── DSC_0001.jpg          # keeper flatten of the RAW
+└── Vacation2024-edit/              # created on load
+    ├── DSC_0001.NEF.granite.json   # this photo's edit recipe
+    ├── session.granite.json        # ratings, labels, picks, rejects
+    ├── people.granite.json         # who appears where (if you grouped by person)
+    └── DSC_0002_nobg.png           # background removal output
 ```
 
-The video editor follows the same rule per file — loading `clip.mp4` creates
-`clip-edit/` beside it, and each operation writes a new file there rather than
-overwriting the last, which is what lets operations chain and **Reset to
-Original** work.
+Because an edit is a list of settings, any of it can be changed or undone
+later, in any order, and there is no chain of re-saved JPEGs to lose quality
+along. A damaged settings file never stops a photo opening; it opens unedited
+and says why. Files written by version 1 (`*_graded.jpg` and so on) are left
+alone, and the web gallery still reads them.
 
-The three *publishing* actions — panoramic reel, Instagram export, and
-**Generate Gallery** — ask you where to save instead, since those outputs
-usually belong somewhere else entirely. The gallery still reads its images
-exclusively from the edit folder.
+The video editor works differently: each operation writes a new clip into
+`clip-edit/`, which is what lets operations chain and **Reset to Original**
+work. Exports, Instagram sets, reels and galleries are saved where you choose.
 
 ### Hardware Adaptation
 At startup, the app logs detected CPU cores, RAM, ONNX execution provider, and calculates a safe export budget (half of available RAM, capped at 8GB). This ensures batch operations never OOM or freeze the OS.
@@ -390,9 +385,9 @@ See [README_INSTALL.md](README_INSTALL.md) for Windows SmartScreen and macOS Gat
 
 ### Performance Tips
 - Preview caching is LRU-bounded (256 images in RAM by default) — scroll smoothly even on integrated graphics
-- Smart Cull uses downscaled previews for scoring, so batch analysis is fast
-- Edit-folder workflow means no re-reading originals for each export
-- Web publisher resizes once per batch, so large exports finish in seconds
+- Culling reads the camera's embedded JPEG from each RAW instead of developing it, and uses every core
+- The Develop preview renders from a 1600 px proxy with exactly the export's pipeline; simple slider moves take about 15 ms on an i5-8350U
+- Two cameras in the test set (an iPhone XS DNG and a Hasselblad H3D) carry no usable embedded preview, so they are developed at half size and cull several times slower
 
 ## Roadmap
 
@@ -408,60 +403,51 @@ nothing here reads as a promise the code does not keep.
 
 | Requirement | Status |
 | --- | --- |
-| Native RAW (CR3/NEF/ARW/DNG), JPEG, TIFF with no pre-conversion | **Done** |
-| Focus / blur quality scoring | **Done** — Laplacian variance |
-| Duplicate & burst sequence detection | **Done** — perceptual hash + capture-time grouping |
-| Cull to a target count | **Done** — quota spread across bursts |
-| Star ratings & colour labels to `.xmp` sidecars | **Done** — merges, never clobbers |
-| Closed-eye / blink detection | **Done** — YuNet detection + per-eye openness scoring, wired into burst ranking. Heuristic, not a trained classifier (see below) |
-| Identifying the same person across a shoot | **Not built.** Face *detection* now exists, but telling one person from another needs recognition embeddings (e.g. SFace) on top |
-| Loupe / Survey / spray-can review UI | **Not built.** Review today is the Library grid plus the cull report |
+| Native RAW, phone DNG, HEIC, JPEG, TIFF with no pre-conversion | **Done** |
+| 1,000 RAW culled fast | **Done for 5 minutes on all nine cameras tested; 90 seconds on five of nine** — see below |
+| Focus scoring on the faces, not the background | **Done** |
+| Blink detection by eye aspect ratio | **Done** — 478-point mesh. Checked on four faces with eyes painted shut, not on real blinks (see below) |
+| Smile and open-mouth detection | **Done** — from the mesh's expression coefficients |
+| Duplicate and burst detection, cull to a target | **Done** |
+| Identify the same person across a shoot | **Done** — local face recognition and clustering. Checked for self-consistency, not measured on a real event |
+| Survey, face loupe, keyboard culling | **Done** |
+| Ratings and labels to `.xmp` sidecars | **Done** — merges, never clobbers |
 
 ### Editing & retouching
 
 | Requirement | Status |
 | --- | --- |
-| Manual RAW adjustment sliders | **Done** — exposure/contrast/saturation, white balance, 6 film grades |
-| Subject / background masking | **Partial** — background removal produces a subject mask; it is not yet exposed as an editable mask |
-| Skeletal posture / body-aware levelling | **Done** — BlazePose (optional ~17 MB download) reports shoulders, spine and hips; levels full-body frames to 0.5° and gets back-turned subjects the right way up |
-| Background replacement | **Partial** — cutout exists, compositing a new background does not |
-| Skin smoothing, blemish & wrinkle reduction | **Not built.** Face detection and pose both exist now, so classical frequency-separation retouching targeted at the face box is the next tractable step here |
-| Teeth whitening, glare removal, stray-hair removal, clothing de-wrinkling | **Not built.** Each needs its own trained segmentation model |
-| AI profiles trained from a photographer's Lightroom catalogue | **Not built.** This is a training pipeline and a model architecture, not a feature flag — the single largest item in the spec |
-| Marketplace of pre-built styles | **Not built.** Needs server infrastructure and curated content |
+| Parametric RAW develop (tone, curves, HSL, grading, dehaze, lens, LUTs, geometry) | **Done** |
+| Layers, blend modes, masks | **Done** |
+| Subject, skin, teeth, eyes masks | **Done** |
+| Hair and sky masks | **Partial** — work, but unmeasured; offered as a starting point |
+| Skin smoothing, healing, cloning, teeth, eyes | **Done** |
+| Inpainting and corner fill | **Done** — fast fill always; neural fill with a 93 MB model. Quality not yet judged on real prints |
+| Vector text, shapes, watermarks, SVG and PDF | **Done** |
+| ProRAW local tone mapping | **Not built** — detected and reported, not applied |
+| AI profiles trained from a photographer's Lightroom catalogue | **Not built** — a training pipeline, the largest item in the spec |
+| Marketplace of styles | **Not built** |
 
 ### Client delivery
 
 | Requirement | Status |
 | --- | --- |
-| Static web gallery with category tabs | **Done** — self-hosted HTML output |
-| Client proofing, favourites, face search, print ordering, 4K downloads | **Not built.** These need a hosted backend, accounts and payments; the desktop app only generates static galleries |
-
-### Other near-term items
-
-- [ ] ONNX subject detection for selective masks (auto-star hero shots)
-- [ ] EXIF-driven smart grouping (camera + lens combo)
-- [ ] Batch watermarking
-- [ ] Direct Instagram upload (currently exports, you upload)
-- [ ] Keyboard shortcuts for rapid culling
+| Static web gallery with category tabs | **Done** |
+| Client proofing, favourites, face search, print ordering | **Not built.** These need a hosted backend, accounts and payments |
 
 ### Why auto-levelling ignores head roll
 
-The obvious approach — level the line between the detected eyes — does not
-work with the bundled face model, and the measurements are recorded here so
-the idea is not retried blind:
+Version 1 could not measure head roll at all: the five-point face detector
+pulls its landmarks toward an upright face, so rotating a portrait **24°**
+moved the measured eye line about **5°**, and detection confidence stayed
+**flat across ±20°**.
 
-- Rotating a portrait through **24°** moved the measured eye line by about
-  **5°**. YuNet regresses its landmarks toward an upright configuration, so
-  the eye line is close to horizontal whatever the head is doing.
-- Searching for the rotation of peak detection confidence fails for the same
-  underlying reason: the detector is deliberately tolerant of in-plane
-  rotation, so confidence stayed **flat across the entire ±20° sweep**.
-
-The pose model behaves the same way when swept — its confidence sat at
-**1.00 at all four quarter turns** — which is exactly why the body signal
-reads the landmark *geometry* instead of hunting for a confidence peak. A
-landmark moves with the body; a confidence score does not.
+The 478-point face mesh in 2.0 *can* measure it: the eye-corner line tracked
+a known rotation to within about **1° across ±25°** (5° off at 40°). It is
+still not used to level the photograph, for the same reason spine lean is
+not: a tilted head is usually the subject's pose, and "correcting" it would
+rotate the whole frame away from a level horizon. Levelling stays with the
+scene's lines and the body.
 
 ### Reading posture: what the body engine can and cannot do
 
@@ -496,9 +482,8 @@ so a head-and-shoulders crop gets a reading and no automatic correction.
 axis departs from vertical is a property of the subject, not the camera.
 Straightening it would be editing the pose, not levelling the photograph.
 
-**Still not built:** generative corner fill, which needs an inpainting model.
-Rotating leaves wedge-shaped gaps, and the two honest options are to crop
-them away or leave them black — both of which the app offers.
+**Corner fill** is now built: choose *Fill* and the wedges straightening
+leaves are painted in at export, by a fast fill or, with its model, by LaMa.
 
 **A note on what gets measured.** `line_tilt` previously read the black
 wedges left by an earlier rotation as scene structure: their borders are
@@ -510,47 +495,63 @@ hit it.
 
 ### How blink detection actually works, and what it is not
 
-YuNet returns five landmarks per face, two of which are eye *centres*. It
-gives no eye contour, so the standard Eye Aspect Ratio — which needs six
-points per eye — cannot be computed from it. Instead a patch is cropped
-around each eye centre and the **vertical extent of the dark region** inside
-it is measured: an open eye shows the iris as a tall dark blob, a closed lid
-shows only a thin horizontal lash line.
+A 478-point face mesh is fitted to every detected face, and each eye's
+**aspect ratio** is measured: its height over its width,
+`(|p2 − p6| + |p3 − p5|) / (2 |p1 − p4|)`. That is a ratio of distances on
+the face itself, so unlike version 1's "how dark is the eye patch" it does
+not depend on iris colour or lighting.
 
-This is a **heuristic, not a trained classifier.** Be aware of what that
-means in practice:
+Two meshes were tried, and the measurement decided between them:
 
-- The decision threshold (`EYE_OPEN_THRESHOLD`, 0.42) was placed using two
-  real faces with open eyes and synthetically closed versions of them. Open
-  eyes measured 0.52-0.78 and closed 0.15-0.23, so the gap is wide — but
-  two faces is **not** a validated dataset.
-- Sunglasses, heavy shadow, strong side-lighting, motion blur across the eye,
-  and faces turned far from camera have not been tested at all.
-- `eyes_closed` deliberately requires **both** eyes below threshold. One eye
-  alone is far more often a highlight, a stray hair or a head turn than a
-  real blink, and flagging those would make a cull noisy.
-- Every frame also exposes a raw `min_eye_openness` score, so you can judge
-  borderline frames yourself rather than trusting the boolean.
+| Mesh | Open eyes (4 faces) | Same faces, eyes painted shut |
+| --- | --- | --- |
+| 468-point (older) | 0.22–0.32 | 0.17–0.26 — overlaps, unusable |
+| **478-point (used)** | **0.155–0.282** | **0.071–0.142** |
 
-Treat it as a strong first pass worth reviewing, not an oracle. If it
-mis-reads your images, `EYE_OPEN_THRESHOLD` is the one number to tune.
+The model's own "blink" output was also tried and did worse than the plain
+ratio, so it is not used for blinks. Be clear about the limits:
+
+- The "shut" faces are the open ones with the eyes painted over, because no
+  labelled photographs of real blinks were available. That shows the
+  measurement responds; it is not validation on real closed eyes.
+- Four faces is four faces. Nothing is established across skin tones, ages,
+  glasses or lighting.
+- A small face looking down reads low: one reference face (about 30 px
+  across) measured 0.155 open and 0.142 shut, both beside the 0.135
+  threshold. It is recorded as a known limit in the tests.
+- A frame counts as a blink only when a main face's **more open** eye is
+  below the threshold; one low eye is far more often a wink, hair or a turned
+  head. Without the mesh model, the version 1 heuristic is used and the frame
+  says so.
 
 ### A note on the performance target
 
-The spec asks for 1,000 RAW files culled in under five minutes. Measured so
-far, on this hardware:
+The spec asks for 1,000 RAW files culled in under 90 seconds. Measured on an
+**i5-8350U laptop** (4 cores, integrated graphics), 1,000 frames per camera,
+with eye checking on:
 
-| Workload | Per frame | Extrapolated to 1,000 |
-| --- | --- | --- |
-| Blink detection, 512px JPEG | ~19 ms | ~0.3 min |
-| Blink detection, 36MP JPEG | ~341 ms | **~5.7 min** |
+| Camera | Seconds per 1,000 |
+| --- | --- |
+| Sony a6400 (ARW) | **42** |
+| Samsung S10 (DNG) | **51** |
+| Olympus E-M1 II (ORF) | **53** |
+| Canon EOS R6 (CR3) | **61** |
+| Panasonic GH5S (RW2) | **85** |
+| Fujifilm X-S10 (RAF) | 91 |
+| Nikon Z50 II (NEF) | 96 |
+| Canon 5D IV (CR2) | 100 |
+| Pentax K-1 II (PEF) | 104 |
 
-So with blink detection enabled on full-resolution files the target is
-**not** met — and these numbers are from JPEGs, whereas RAW decoding is
-slower still. The cost is dominated by decoding the file, not by the
-detector. Culling without `check_eyes` is far quicker. This has still never
-been benchmarked on genuine camera RAW files, so treat the RAW case as
-unmeasured.
+So **under 90 seconds for five of nine cameras, and under 5 minutes for all
+nine.** The first build took 95–258 seconds; decoding a greyscale copy for
+sharpness and a small colour copy for faces is what closed most of the gap.
+
+Read the numbers for what they are: each run repeats one sample file a
+thousand times, so after the first read it comes from memory. It measures
+decoding and analysis, not reading a thousand different files off a card.
+Two cameras with no usable embedded preview (iPhone XS DNG, Hasselblad H3D)
+have to be developed instead and took 291 and 616 seconds in the first build.
+The full method is in `tests/bench_cull.py`.
 
 ## Contributing
 
