@@ -1,0 +1,38 @@
+[project]
+name = "granite-studios"
+version = "2.0.0.dev0"
+description = "Local-first AI photo and video editing suite"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+dependencies = [
+    "PyQt6",
+    "rawpy",
+    "pillow-heif",
+    "Pillow",
+    "opencv-python-headless",
+    "moviepy",
+    "numpy",
+    "onnxruntime",
+    "pyshortcuts",
+    "psutil",
+    "rembg",
+    "imageio-ffmpeg",
+    "fastapi",
+    "pydantic",
+    "uvicorn[standard]",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra -q --strict-markers"
+markers = [
+    "slow: takes more than a few seconds (model inference, video encoding)",
+    "model: needs a model that is already cached; skipped when it is not",
+    "media: needs a real sample file in tests/data; skipped when it is absent",
+    "benchmark: records a timing; asserts only a loose ceiling",
+]
+filterwarnings = ["ignore::DeprecationWarning"]

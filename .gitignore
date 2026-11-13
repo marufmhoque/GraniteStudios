@@ -229,3 +229,6 @@ icon.icns
 # OS / editor
 .DS_Store
 Thumbs.db
+
+# Test media is fetched on demand and never committed
+tests/data/
