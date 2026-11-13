@@ -5,7 +5,8 @@ Pillow
 opencv-python-headless
 moviepy
 numpy
-onnxruntime
+onnxruntime-directml; sys_platform == "win32"
+onnxruntime; sys_platform != "win32"
 pyshortcuts
 psutil
 rembg

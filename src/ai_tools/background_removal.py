@@ -30,8 +30,24 @@ class BackgroundRemover:
             try:
                 from rembg import new_session
 
-                logger.info("Initializing background removal model (first use, may take 30s)...")
-                self._session = new_session()
+                from src.engine.hardware import DIRECTML, get_execution_providers
+
+                providers = list(get_execution_providers())
+                if providers[0] == DIRECTML:
+                    logger.info(
+                        "Initializing background removal on the graphics card. The first "
+                        "time on a machine this can take about a minute while the driver "
+                        "prepares; after that it is immediate."
+                    )
+                else:
+                    logger.info("Initializing background removal model (first use, may take 30s)...")
+                try:
+                    self._session = new_session(providers=providers)
+                except Exception as exc:
+                    if len(providers) == 1:
+                        raise
+                    logger.warning("%s could not start (%s); using the CPU.", providers[0], exc)
+                    self._session = new_session(providers=providers[-1:])
             except ImportError:
                 raise ImportError(
                     "rembg is not installed. Run: pip install rembg"
