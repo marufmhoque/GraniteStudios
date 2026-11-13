@@ -113,11 +113,16 @@ architecture and deployment steps.
 - **Sharpen Recoverable** is offered only for frames with detail left to lift. Past that point sharpening adds halos rather than restoring detail — the Laplacian score rises either way, which is exactly why the score alone does not decide it
 
 ### Auto-levelling
-- **Auto-Level Selected** straightens a whole batch in one pass
+- **Auto-Level Selected** straightens a whole batch in one pass. Two engines run, because neither covers every photograph
 - *Which way up* comes from face detection — a detector will not fire on an upside-down face, so each quarter turn is tried. All 90/180/270 turns were recovered correctly
+- When no face is visible (a subject facing away, a face too small), the **body** answers instead: the direction from the hips to the shoulders is read straight off the pose landmarks and rounded to a quarter turn. With the face engine switched off entirely, all four turns were still recovered
 - *How far off level* comes from the straight lines in the scene. Round-tripping known tilts leaves **under 1° residual**
+- When the frame has no usable lines — a portrait against a plain wall — the **shoulder and hip lines** carry it instead. Over a ±14° sweep that left **0.6° mean error, 1.7° worst**
+- Lines are preferred over the body wherever there are any: lines measure the camera against the world, whereas a person can genuinely be leaning. In practice the two rarely compete — the test portraits yielded no usable lines at all, and the frames with strong lines had no usable body
+- **Use body** is optional and needs a one-off ~17 MB model download, which the app asks about before fetching. Everything is verified against a pinned fingerprint and nothing is uploaded
+- **Check Posture** reports what the subjects are doing — how much of the body is in frame, whether the camera was rolled, whether the subject is leaning — and changes nothing
 - Rotating leaves wedge corners; **Crop corners** cuts back to the largest clean rectangle, or leave it off to keep them black. There is no generative fill
-- **Head roll is deliberately not used.** See the caveat below
+- **Head roll is still deliberately not used.** See the caveat below
 
 ### Reviewing and rejecting
 - **Select All / None / Invert**, scoped to whatever the view filter is showing — selecting frames you cannot see would be a trap
@@ -290,7 +295,9 @@ What that covers today:
 | `cull_to_target` | Quota spread evenly across bursts, picks each burst's sharpest first; clamps above the image count; rejects a negative target |
 | `create_shortcut.py` | Writes a `.lnk` whose argument is quoted, targets `pythonw.exe`, and launches successfully from a path containing a space |
 | `blur_analysis.py` | Sharp frames not flagged across 3 reference images; defocus classified correctly at 2 blur radii each; **15/15 motion cases detected with direction within 15°**; strictness levels verified to change the verdict on the same frame; the rescue gate refuses frames past recovery |
-| `orientation.py` | Upright frames left alone; **all 90/180/270 turns recovered**; known tilts round-tripped to under 1° residual; crop leaves no black corners; batch skips already-level frames |
+| `orientation.py` | Upright frames left alone; **all 90/180/270 turns recovered** (and still recovered with the face engine disabled, using the body); known tilts round-tripped to under 1° residual; blank padding no longer read as scene structure; crop leaves no black corners; batch skips already-level frames |
+| `pose_analysis.py` | Landmarks verified against the image (skeleton lands on the body); **body tilt tracks a known roll 1:1 across ±24°**; levelling a full-body frame leaves **0.53° mean / 1.33° worst** residual; shoulders-only leaves 2.90° / 9.54° and is therefore never applied; a half-out-of-frame body is refused rather than guessed; deterministic across repeat runs; degrades to lines-only with the models absent |
+| `model_store.py` | Pinned digests reject a substituted or truncated download; a cached model that fails verification is refetched; a missing model disables its feature instead of raising |
 | `face_analysis.py` | Model download checksum-pinned and verified; detects two real faces and **no false positives** across six non-face sample images; stable from 0.4x to 2x scale; grayscale, RGBA, empty and `None` inputs; landmarks mapped back to full-resolution coordinates after downscaling; **degrades to unavailable rather than raising when the model is absent** |
 | blink-aware culling | With eye checking off, the sharpest frame wins even with closed eyes; with it on, the same burst picks the softer open-eyed frame instead — verified on bursts built so sharpness and open eyes disagree |
 | `video/` | Every timing, spatial, structure, audio, and colour operation; all 4 export presets; `.cube` LUT; multi-step `JobManager` pipelines including the failure path |
@@ -412,8 +419,9 @@ nothing here reads as a promise the code does not keep.
 | --- | --- |
 | Manual RAW adjustment sliders | **Done** — exposure/contrast/saturation, white balance, 6 film grades |
 | Subject / background masking | **Partial** — background removal produces a subject mask; it is not yet exposed as an editable mask |
+| Skeletal posture / body-aware levelling | **Done** — BlazePose (optional ~17 MB download) reports shoulders, spine and hips; levels full-body frames to 0.5° and gets back-turned subjects the right way up |
 | Background replacement | **Partial** — cutout exists, compositing a new background does not |
-| Skin smoothing, blemish & wrinkle reduction | **Not built.** Face detection has now landed, so classical frequency-separation retouching targeted at the face box is the next tractable step here |
+| Skin smoothing, blemish & wrinkle reduction | **Not built.** Face detection and pose both exist now, so classical frequency-separation retouching targeted at the face box is the next tractable step here |
 | Teeth whitening, glare removal, stray-hair removal, clothing de-wrinkling | **Not built.** Each needs its own trained segmentation model |
 | AI profiles trained from a photographer's Lightroom catalogue | **Not built.** This is a training pipeline and a model architecture, not a feature flag — the single largest item in the spec |
 | Marketplace of pre-built styles | **Not built.** Needs server infrastructure and curated content |
@@ -446,13 +454,55 @@ the idea is not retried blind:
   underlying reason: the detector is deliberately tolerant of in-plane
   rotation, so confidence stayed **flat across the entire ±20° sweep**.
 
-Head roll therefore needs a model that reports pose. None is bundled, so
-face-based fine levelling here would be guesswork dressed as measurement.
-Scene lines are used instead, and they measure well.
+The pose model behaves the same way when swept — its confidence sat at
+**1.00 at all four quarter turns** — which is exactly why the body signal
+reads the landmark *geometry* instead of hunting for a confidence peak. A
+landmark moves with the body; a confidence score does not.
 
-**Also not built:** reading shoulders, spine and hips (needs pose
-estimation), and generative corner fill (needs an inpainting model). A
-subject whose torso leans but whose surroundings are square is left alone.
+### Reading posture: what the body engine can and cannot do
+
+Pose estimation is now bundled (optional download), so shoulders, spine and
+hips are available. What that does and does not buy:
+
+**Camera roll versus a leaning subject.** A tilted shoulder line on its own
+is ambiguous — it happens when the camera was rolled and when the subject
+shifted their weight. The hips settle it: camera roll turns the whole body
+together, a lean moves the shoulders against the hips. A correction is only
+offered when the two agree.
+
+The agreement threshold is measured, not chosen by taste. A subject standing
+square still reads a shoulder/hip spread of **4–7°** frame to frame, because
+the two lines are regressed independently — an initial 6° gate refused
+ordinary upright photographs, so it is 12°. A genuine lean is far wider: the
+worst case in testing, a body half out of frame, spread **57°** and was
+correctly refused.
+
+**Shoulders without hips are reported but never applied.** Correcting a
+frame by the body angle and re-measuring what is left over:
+
+| Visible | Mean residual | Worst |
+|---|---|---|
+| Shoulders **and** hips | **0.53°** | 1.33° |
+| Shoulders only | 2.90° | **9.54°** |
+
+A ten-degree error is worse than the tilt most people would have left alone,
+so a head-and-shoulders crop gets a reading and no automatic correction.
+
+**Spine lean is reported, never corrected.** How far the shoulder-to-hip
+axis departs from vertical is a property of the subject, not the camera.
+Straightening it would be editing the pose, not levelling the photograph.
+
+**Still not built:** generative corner fill, which needs an inpainting model.
+Rotating leaves wedge-shaped gaps, and the two honest options are to crop
+them away or leave them black — both of which the app offers.
+
+**A note on what gets measured.** `line_tilt` previously read the black
+wedges left by an earlier rotation as scene structure: their borders are
+flawless straight lines sitting at precisely the angle that produced them, so
+a corrected frame looked strongly tilted. Blank regions are now masked out
+before edge detection. This surfaced only because a test fed it a padded
+frame — any already-rotated, letterboxed or scanned photograph would have
+hit it.
 
 ### How blink detection actually works, and what it is not
 

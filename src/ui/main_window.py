@@ -45,6 +45,7 @@ from src.engine.resources import resource_path
 from src.engine.universal_loader import UniversalLoader, ImageMetadata
 from src.ai_tools import blur_analysis
 from src.ai_tools import orientation
+from src.ai_tools import pose_analysis
 from src.ai_tools import xmp_sidecar
 from src.ai_tools.culling import SmartCull
 from src.ai_tools.color_engine import ColorEngine
@@ -900,12 +901,36 @@ class MainWindow(QMainWindow):
         self.auto_level_button = QPushButton("Auto-Level Selected")
         self.auto_level_button.setObjectName("SecondaryButton")
         self.auto_level_button.setToolTip(
-            "Turn photos the right way up and level them, in one batch. "
-            "Which way is up comes from face detection; how far off level, "
-            "from the straight lines in the scene."
+            "Turn photos the right way up and level them, in one batch.\n\n"
+            "Which way is up comes from face detection, falling back to the "
+            "subject's body when no face is visible. How far off level comes "
+            "from the straight lines in the scene, falling back to the line "
+            "of the shoulders and hips when there are none."
         )
         self.auto_level_button.clicked.connect(self._on_auto_level)
         blur_row.addWidget(self.auto_level_button)
+
+        self.level_body_check = QCheckBox("Use body")
+        self.level_body_check.setChecked(pose_analysis.PoseAnalyzer.is_cached())
+        self.level_body_check.setToolTip(
+            "Read posture from the subject's shoulders and hips.\n\n"
+            "This is what straightens a portrait shot against a plain wall, "
+            "where there are no lines to measure, and what gets a "
+            "back-turned subject the right way up.\n\n"
+            "Needs a one-off model download."
+        )
+        self.level_body_check.toggled.connect(self._on_body_engine_toggled)
+        blur_row.addWidget(self.level_body_check)
+
+        self.posture_button = QPushButton("Check Posture")
+        self.posture_button.setObjectName("SecondaryButton")
+        self.posture_button.setToolTip(
+            "Report what the selected photos' subjects are doing: how much "
+            "of the body is in frame, whether the camera was rolled, and "
+            "whether the subject is leaning. Changes nothing."
+        )
+        self.posture_button.clicked.connect(self._on_check_posture)
+        blur_row.addWidget(self.posture_button)
 
         self.level_crop_check = QCheckBox("Crop corners")
         self.level_crop_check.setChecked(True)
@@ -1353,14 +1378,166 @@ class MainWindow(QMainWindow):
     # Auto-levelling
     # ------------------------------------------------------------------ #
 
+    # ------------------------------------------------------------------ #
+    # Posture and levelling
+    # ------------------------------------------------------------------ #
+
+    def _pose_analyzer(self, download_ok: bool = False):
+        """The pose analyzer, or None when the body engine is off or absent.
+
+        Never downloads on its own: a levelling run must not stall partway
+        through a batch on a model fetch nobody agreed to. The checkbox asks
+        first, and passes ``download_ok`` once the user has said yes.
+        """
+        if not getattr(self, "level_body_check", None) or not self.level_body_check.isChecked():
+            return None
+        if not download_ok and not pose_analysis.PoseAnalyzer.is_cached():
+            return None
+        try:
+            return pose_analysis.PoseAnalyzer(download=download_ok)
+        except Exception as exc:
+            logger.warning("Pose models unavailable: %s", exc)
+            return None
+
+    def _on_body_engine_toggled(self, checked: bool) -> None:
+        """Offer the one-off model download the first time this is switched on."""
+        if not checked or pose_analysis.PoseAnalyzer.is_cached():
+            return
+        size = pose_analysis.PoseAnalyzer.download_mb()
+        answer = QMessageBox.question(
+            self,
+            "Download the pose models?",
+            f"Reading posture needs two models, about {size:.0f} MB in total.\n\n"
+            "They are downloaded once, checked against a known fingerprint, "
+            "and kept on this computer. Nothing is uploaded, and your photos "
+            "stay on this machine.\n\nDownload them now?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            self.level_body_check.setChecked(False)
+            return
+
+        def work():
+            return pose_analysis.PoseAnalyzer(download=True).available
+
+        def done(available):
+            if available:
+                self.status_label.setText(
+                    "Pose models ready. Levelling can now use the subject's body."
+                )
+                return
+            self.level_body_check.setChecked(False)
+            QMessageBox.warning(
+                self,
+                "Download failed",
+                "The pose models could not be fetched, so levelling will use "
+                "scene lines and faces only. Check the connection and try again.",
+            )
+
+        self.status_label.setText(f"Downloading the pose models ({size:.0f} MB)…")
+        self._run_task(work, done, self.posture_button)
+
+    def _on_check_posture(self) -> None:
+        """Report what the subjects are doing. Reads only; changes nothing."""
+        targets = self._selected_paths() or list(self.image_paths)
+        if not targets:
+            QMessageBox.information(self, "No photos", "Load a folder first.")
+            return
+        if not self.level_body_check.isChecked():
+            QMessageBox.information(
+                self,
+                "Body engine off",
+                "Tick “Use body” first — reading posture needs the pose models.",
+            )
+            return
+        analyzer = self._pose_analyzer()
+        if analyzer is None or not analyzer.available:
+            QMessageBox.information(
+                self,
+                "Pose models missing",
+                "The pose models are not on this computer yet. Untick and "
+                "re-tick “Use body” to download them.",
+            )
+            return
+
+        loader = self.loader
+        self.status_label.setText(f"Reading posture in {len(targets)} photo(s)…")
+
+        def work():
+            rows = []
+            for path in targets:
+                array = loader.load_array(path)
+                bgr = cv2.cvtColor(array, cv2.COLOR_RGB2BGR)
+                rows.append((Path(path).name, analyzer.analyze(bgr)))
+            return rows
+
+        def done(rows):
+            readable = [(n, r) for n, r in rows if r.count]
+            rolled, leaning, level = [], [], 0
+            for name, report in readable:
+                pose = report.main
+                if pose is None:
+                    continue
+                tilt = report.applicable_tilt
+                if tilt is None:
+                    if pose.asymmetry is not None:
+                        leaning.append((name, pose))
+                elif abs(tilt) >= orientation.MIN_CORRECTION_DEG:
+                    rolled.append((name, tilt))
+                else:
+                    level += 1
+
+            lines = [
+                f"{len(readable)} of {len(rows)} photo(s) had a body clear enough to read.",
+                "",
+                f"  {level} already level",
+                f"  {len(rolled)} look like a rolled camera (Auto-Level can fix these)",
+                f"  {len(leaning)} have a leaning subject (left alone — that is "
+                f"the pose, not the camera)",
+            ]
+            if rolled:
+                lines += ["", "Most tilted:"]
+                for name, tilt in sorted(rolled, key=lambda r: -abs(r[1]))[:8]:
+                    lines.append(f"  {name}  {tilt:+.1f}°")
+            if leaning:
+                lines += ["", "Leaning subjects:"]
+                for name, pose in leaning[:8]:
+                    lines.append(
+                        f"  {name}  shoulders and hips differ by {pose.asymmetry:.1f}°"
+                    )
+            shoulders_only = sum(
+                1 for _, r in readable if r.main is not None and not r.main.has_hips
+            )
+            if shoulders_only:
+                lines += [
+                    "",
+                    f"{shoulders_only} photo(s) showed shoulders but no hips. Those are "
+                    "reported but never levelled automatically: with one line instead "
+                    "of two the angle was out by up to 9° in testing.",
+                ]
+
+            QMessageBox.information(self, "Posture", "\n".join(lines))
+            self.status_label.setText(
+                f"Posture: {level} level, {len(rolled)} rolled, {len(leaning)} leaning "
+                f"({len(rows) - len(readable)} with no readable body). Nothing changed."
+            )
+
+        self._run_task(work, done, self.posture_button)
+
     def _on_auto_level(self) -> None:
         """Straighten the selected photos, writing results to the edit folder.
 
         Works on a batch, so a whole event can be normalised in one pass.
-        Which way up a frame goes is decided by face detection; how far from
-        level it is, by the straight lines in the scene. Head roll is not
-        used — the bundled face model cannot measure it (see
-        src/ai_tools/orientation.py for the numbers).
+
+        Two engines, because neither covers everything. Which way up a frame
+        goes is decided by face detection, falling back to the direction from
+        the subject's hips to their shoulders when no face is visible. How far
+        from level is decided by the scene's straight lines, falling back to
+        the line of the shoulders and hips when the frame has none.
+
+        Head roll is still not used: the face model cannot measure it. The
+        numbers behind that are in src/ai_tools/orientation.py.
         """
         targets = self._drop_rejected(self._selected_paths(), "Auto-level")
         if not targets:
@@ -1375,6 +1552,7 @@ class MainWindow(QMainWindow):
         edit_folder = self.edit_folder
         loader = self.loader
         crop = self.level_crop_check.isChecked()
+        pose_analyzer = self._pose_analyzer()
 
         def work():
             from src.ai_tools.face_analysis import FaceAnalyzer
@@ -1384,7 +1562,9 @@ class MainWindow(QMainWindow):
             for path in targets:
                 array = loader.load_array(path)
                 bgr = cv2.cvtColor(array, cv2.COLOR_RGB2BGR)
-                fixed, result = orientation.auto_rotate(bgr, analyzer=analyzer, crop=crop)
+                fixed, result = orientation.auto_rotate(
+                    bgr, analyzer=analyzer, pose_analyzer=pose_analyzer, crop=crop
+                )
                 if not result.needs_rotation:
                     skipped += 1
                     continue
@@ -1401,10 +1581,13 @@ class MainWindow(QMainWindow):
                 )
                 return
             turns = sum(1 for _, r in written if r.coarse)
+            by_body = sum(1 for _, r in written if r.method == "body")
             detail = f"{turns} needed a quarter turn; " if turns else ""
+            body_note = f"{by_body} levelled from the subject's body; " if by_body else ""
             self.status_label.setText(
                 f"Straightened {len(written)} photo(s) into {edit_folder.name}/ as "
-                f"*_level.jpg ({detail}{skipped} already upright). Originals untouched."
+                f"*_level.jpg ({detail}{body_note}{skipped} already upright). "
+                f"Originals untouched."
             )
 
         self._run_task(work, done, self.auto_level_button)

@@ -12,24 +12,34 @@ horizons are long straight lines that ought to sit square to the frame;
 measuring how far they have drifted gives the tilt. Round-tripping a known
 tilt through detection and correction leaves well under a degree.
 
-**Why head roll is not used.** The obvious approach -- take the line
-between the detected eyes and level it -- does not work with the bundled
-detector, and the measurements are worth recording so nobody tries again:
+**Which way is up, when there is no face.** A subject with their back to
+the camera defeats the face detector entirely. The pose model fills that gap:
+the direction from the hips to the shoulders is read straight off the
+landmarks and rounded to a quarter turn. Every turn of a full-body frame was
+recovered correctly this way in testing.
+
+**Why head roll is still not used.** The obvious approach -- take the line
+between the detected eyes and level it -- does not work with the face
+detector, and the measurements are worth keeping so nobody tries again:
 rotating a portrait through 24 degrees moved the measured eye line by about
 5, because YuNet regresses landmarks towards an upright configuration.
 Searching for the rotation of peak detection confidence fails for the same
 underlying reason -- the detector is deliberately tolerant of in-plane
-rotation, so confidence stayed flat across the entire plus or minus 20
-degree sweep. Head roll therefore needs a model that reports pose, which is
-not bundled, and any face-based fine levelling here would be guesswork
-dressed as measurement.
+rotation, so confidence stayed flat across the entire plus or minus 20 degree
+sweep. The pose model behaves the same way when swept (its confidence sat at
+1.00 at all four quarter turns), which is exactly why the body signal above
+reads the landmark geometry instead of sweeping for a peak.
 
-**What else is missing.** Reading shoulders, spine and hips needs a
-pose-estimation model; none is bundled, so a subject whose torso leans but
-whose surroundings are square will be left alone. There is no generative
-fill either: rotating a frame leaves wedge-shaped gaps at the corners, and
-the honest options are to crop them away or leave them, both of which this
-module does.
+**Levelling by the body.** Shoulders and hips give a second tilt estimate
+for frames with no usable lines. It is only applied when both are visible and
+agree: correcting by that angle and re-measuring leaves 0.53 degrees on
+average. Shoulders alone leave 2.90 degrees and up to 9.54, so a
+shoulders-only reading is reported but never applied -- see
+``pose_analysis.MIN_APPLY_CONFIDENCE``.
+
+**What is still missing.** There is no generative fill: rotating a frame
+leaves wedge-shaped gaps at the corners, and the honest options are to crop
+them away or leave them, both of which this module does.
 """
 
 from __future__ import annotations
@@ -63,6 +73,11 @@ class OrientationResult:
     confidence: float = 0.0
     face_count: int = 0
     line_angle: float | None = None
+    body_angle: float | None = None
+    body_confidence: float = 0.0
+    pose_count: int = 0
+    framing: str | None = None
+    coarse_method: str = "none"
 
     @property
     def total_angle(self) -> float:
@@ -157,6 +172,26 @@ def _largest_inscribed_rect(w: int, h: int, angle: float) -> tuple[int, int]:
     return max(0, int(wr)), max(0, int(hr))
 
 
+def _blank_mask(gray: np.ndarray) -> np.ndarray | None:
+    """Mask covering filled-in blank areas, or None if there are none.
+
+    A frame that has been rotated before, letterboxed, or scanned carries
+    wedges and bars of pure black. Their boundaries are the straightest lines
+    in the picture and they sit at precisely the angle that produced them, so
+    an edge detector reads them as overwhelming evidence that the frame is
+    tilted by exactly the amount it was already corrected by.
+
+    Only near-black is treated this way, and the mask is grown a little so it
+    covers the transition rather than just the flat interior. A photograph
+    with a genuinely black backdrop loses the edges along that backdrop, which
+    is a fair trade: it discards evidence rather than inventing it.
+    """
+    blank = (gray <= 2).astype(np.uint8)
+    if float(blank.mean()) < 0.002:
+        return None
+    return cv2.dilate(blank, np.ones((7, 7), np.uint8), iterations=1)
+
+
 def line_tilt(image: np.ndarray) -> tuple[float | None, float]:
     """Scene tilt from long straight edges that ought to be square.
 
@@ -165,8 +200,14 @@ def line_tilt(image: np.ndarray) -> tuple[float | None, float]:
     horizontal, since both should be square to the frame.
     """
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
-    gray = cv2.GaussianBlur(gray, (5, 5), 0)
-    edges = cv2.Canny(gray, 60, 180, apertureSize=3)
+    blank = _blank_mask(gray)
+    edges = cv2.Canny(cv2.GaussianBlur(gray, (5, 5), 0), 60, 180, apertureSize=3)
+    if blank is not None:
+        # The border of a blank region is a flawless straight line at exactly
+        # the angle of whatever rotation produced it, so leaving it in means
+        # measuring our own padding and calling it the scene. See
+        # ``_blank_mask`` for why this is worth the edges it costs.
+        edges[blank > 0] = 0
 
     min_length = max(40, int(min(gray.shape[:2]) * 0.22))
     segments = cv2.HoughLinesP(
@@ -233,8 +274,43 @@ def coarse_orientation(analyzer, image: np.ndarray) -> tuple[int, float]:
     return best_rotation, float(min(1.0, best_score))
 
 
-def detect(image: np.ndarray, analyzer=None) -> OrientationResult:
-    """Work out how far from upright a frame is."""
+def _pose_report(pose_analyzer, image):
+    """Analyse ``image`` for bodies, tolerating an unavailable pose model."""
+    if pose_analyzer is None or not pose_analyzer.available:
+        return None
+    try:
+        report = pose_analyzer.analyze(image)
+    except Exception as exc:  # a missing model must not break levelling
+        logger.debug("Pose analysis failed: %s", exc)
+        return None
+    return report if report.count else None
+
+
+def default_pose_analyzer():
+    """A pose analyzer, but only if its models are already on disk.
+
+    Levelling must not stall mid-batch on a 17 MB download that the user
+    never asked for, so this never fetches. A caller that wants the body
+    engine switched on passes its own analyzer, created with downloading
+    enabled, after telling the user what that costs.
+    """
+    try:
+        from src.ai_tools.pose_analysis import PoseAnalyzer
+
+        if not PoseAnalyzer.is_cached():
+            return None
+        return PoseAnalyzer(download=False)
+    except Exception:
+        return None
+
+
+def detect(image: np.ndarray, analyzer=None, pose_analyzer=None) -> OrientationResult:
+    """Work out how far from upright a frame is.
+
+    ``analyzer`` is a face analyzer and ``pose_analyzer`` a body one; either
+    may be omitted, in which case a cached one is used if there is one. With
+    neither, only the scene-line engine runs.
+    """
     if image is None or image.size == 0:
         return OrientationResult()
 
@@ -246,30 +322,64 @@ def detect(image: np.ndarray, analyzer=None) -> OrientationResult:
         except Exception:
             analyzer = None
 
+    if pose_analyzer is None:
+        pose_analyzer = default_pose_analyzer()
+
     small = _prepare(image)
 
-    # Faces settle which way is up; they cannot settle fine tilt. See the
-    # module docstring for the measurements behind that split.
+    # --- which way up ---------------------------------------------------- #
+    # Faces answer this best when there is one, because the detector simply
+    # does not fire on an upside-down face. When there is not -- a subject
+    # facing away, or too small a face -- the body answers it instead.
     coarse, coarse_conf = coarse_orientation(analyzer, small)
+    coarse_method = "faces" if coarse_conf > 0.0 else "none"
+
+    report = _pose_report(pose_analyzer, small)
+    if coarse_conf <= 0.0 and report is not None:
+        turn = report.quarter_turn
+        if turn is not None:
+            main = report.main
+            coarse, coarse_method = turn, "body"
+            coarse_conf = float(main.confidence) if main is not None else 0.0
+
     upright = small if coarse == 0 else rotate_image(small, coarse, crop=False)
 
     faces = 0
     if analyzer is not None and analyzer.available:
         faces = len(analyzer.detect(upright, measure_eyes=False))
 
+    # The tilt has to be measured on the frame as it will be left, so a
+    # quarter turn means re-reading the body rather than rotating the angle.
+    if coarse and report is not None:
+        report = _pose_report(pose_analyzer, upright)
+
+    # --- how far from level ---------------------------------------------- #
     l_angle, l_conf = line_tilt(upright)
-    if l_angle is not None:
+    body_angle, body_conf = (None, 0.0) if report is None else report.body_tilt
+    applicable_body = None if report is None else report.applicable_tilt
+
+    # Lines first where there are any: they measure the camera against the
+    # world, whereas a body can genuinely be leaning. In practice the two
+    # rarely compete -- the portraits in testing yielded no usable lines at
+    # all, and the frames with strong lines had no usable body.
+    if l_angle is not None and l_conf > 0.0:
         fine, method, confidence = float(l_angle), "lines", float(l_conf)
+    elif applicable_body is not None:
+        fine, method, confidence = float(applicable_body), "body", float(body_conf)
     else:
         fine, method, confidence = 0.0, "none", 0.0
 
     if abs(fine) > MAX_FINE_CORRECTION_DEG:
+        # A plausibility cap, applied whichever engine produced the reading.
+        # The body engine stayed accurate out to 24 degrees in testing, but a
+        # correction that large is more often a misread than a rolled camera.
         logger.debug("Ignoring implausible tilt of %.1f degrees", fine)
         fine, method, confidence = 0.0, "none", 0.0
 
     if coarse and confidence == 0.0:
         confidence = coarse_conf
 
+    main = None if report is None else report.main
     return OrientationResult(
         coarse=coarse,
         fine=float(fine),
@@ -277,14 +387,19 @@ def detect(image: np.ndarray, analyzer=None) -> OrientationResult:
         confidence=float(confidence),
         face_count=faces,
         line_angle=l_angle,
+        body_angle=body_angle,
+        body_confidence=float(body_conf),
+        pose_count=0 if report is None else report.count,
+        framing=None if main is None else main.framing,
+        coarse_method=coarse_method,
     )
 
 
 def auto_rotate(
-    image: np.ndarray, analyzer=None, crop: bool = True
+    image: np.ndarray, analyzer=None, pose_analyzer=None, crop: bool = True
 ) -> tuple[np.ndarray, OrientationResult]:
     """Detect and apply the correction in one step."""
-    result = detect(image, analyzer=analyzer)
+    result = detect(image, analyzer=analyzer, pose_analyzer=pose_analyzer)
     if not result.needs_rotation:
         return image.copy(), result
     return rotate_image(image, result.total_angle, crop=crop), result

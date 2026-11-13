@@ -26,37 +26,38 @@ you may want to tune against your own images.
 
 from __future__ import annotations
 
-import hashlib
-import json
 import logging
-import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
 import cv2
 import numpy as np
 
+from src.ai_tools import model_store
+from src.ai_tools.model_store import ModelSpec
+
 logger = logging.getLogger(__name__)
 
 # --- Model -------------------------------------------------------------- #
 
-MODEL_FILENAME = "face_detection_yunet_2023mar.onnx"
-MODEL_DIR = Path.home() / ".granitestudios" / "models"
-
 # Pinned so a corrupted or substituted download is rejected rather than fed
 # to the DNN loader. Both values come from the git-lfs pointer that
-# opencv_zoo commits for this file.
-MODEL_SHA256 = "8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4"
-MODEL_SIZE = 232589
-
-# opencv_zoo stores models in git-lfs, so the plain raw URL returns a pointer
-# file rather than the model. The LFS batch API hands back a signed URL for
-# the real object.
-_LFS_BATCH_URL = "https://github.com/opencv/opencv_zoo.git/info/lfs/objects/batch"
-_MODEL_DIRECT_URLS = (
-    "https://media.githubusercontent.com/media/opencv/opencv_zoo/main"
-    "/models/face_detection_yunet/" + MODEL_FILENAME,
+# opencv_zoo commits for this file. Fetching and caching live in
+# ``model_store``, which the pose models share.
+MODEL_SPEC = ModelSpec(
+    filename="face_detection_yunet_2023mar.onnx",
+    sha256="8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4",
+    size=232589,
+    zoo_dir="face_detection_yunet",
+    label="the YuNet face model",
 )
+
+# Kept as module-level names because callers and tests reference them.
+MODEL_FILENAME = MODEL_SPEC.filename
+MODEL_SHA256 = MODEL_SPEC.sha256
+MODEL_SIZE = MODEL_SPEC.size
+MODEL_DIR = model_store.MODEL_DIR
+
 
 # --- Tuning ------------------------------------------------------------- #
 
@@ -166,100 +167,18 @@ class FaceReport:
 # --- Model acquisition -------------------------------------------------- #
 
 
-def _verify(path: Path) -> bool:
-    try:
-        data = path.read_bytes()
-    except OSError:
-        return False
-    if len(data) != MODEL_SIZE:
-        return False
-    return hashlib.sha256(data).hexdigest() == MODEL_SHA256
-
-
-def _fetch(url: str, timeout: int, data: bytes | None = None, headers: dict | None = None) -> bytes:
-    request = urllib.request.Request(url, data=data, headers=headers or {"User-Agent": "GraniteStudios/1.0"})
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        return response.read()
-
-
-def _lfs_download_url() -> str | None:
-    """Ask GitHub's git-lfs batch API where the real object lives."""
-    payload = json.dumps(
-        {
-            "operation": "download",
-            "transfers": ["basic"],
-            "objects": [{"oid": MODEL_SHA256, "size": MODEL_SIZE}],
-        }
-    ).encode()
-    try:
-        raw = _fetch(
-            _LFS_BATCH_URL,
-            timeout=30,
-            data=payload,
-            headers={
-                "Content-Type": "application/vnd.git-lfs+json",
-                "Accept": "application/vnd.git-lfs+json",
-                "User-Agent": "git-lfs/3.0.0",
-            },
-        )
-        obj = json.loads(raw)["objects"][0]
-        return obj["actions"]["download"]["href"]
-    except Exception as exc:
-        logger.debug("LFS batch lookup failed: %s", exc)
-        return None
-
-
 def model_path() -> Path:
-    return MODEL_DIR / MODEL_FILENAME
+    return MODEL_SPEC.path
 
 
 def ensure_model(download: bool = True, timeout: int = 180) -> Path | None:
     """Return a verified model path, downloading it once if needed.
 
-    Returns None when the model is absent and cannot be fetched — callers
+    Returns None when the model is absent and cannot be fetched -- callers
     must treat face analysis as unavailable rather than failing, the same
     way the rest of the app degrades when an optional engine is missing.
     """
-    dest = model_path()
-    if dest.exists():
-        if _verify(dest):
-            return dest
-        logger.warning("Cached YuNet model failed verification; refetching.")
-        try:
-            dest.unlink()
-        except OSError:
-            return None
-
-    if not download:
-        return None
-
-    candidates = list(_MODEL_DIRECT_URLS)
-    lfs = _lfs_download_url()
-    if lfs:
-        # Signed LFS URL first: it is the only one that works when the
-        # media host is unreachable, which is common behind proxies.
-        candidates.insert(0, lfs)
-
-    for url in candidates:
-        try:
-            data = _fetch(url, timeout=timeout)
-        except Exception as exc:
-            logger.debug("Model download failed from %s: %s", url.split("?")[0], exc)
-            continue
-        if len(data) != MODEL_SIZE or hashlib.sha256(data).hexdigest() != MODEL_SHA256:
-            logger.warning("Rejected model from %s: checksum mismatch.", url.split("?")[0])
-            continue
-        try:
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_bytes(data)
-        except OSError as exc:
-            logger.warning("Could not save model: %s", exc)
-            return None
-        logger.info("Downloaded and verified the YuNet face model.")
-        return dest
-
-    logger.info("YuNet face model unavailable — face features will be skipped.")
-    return None
+    return model_store.ensure_model(MODEL_SPEC, download=download, timeout=timeout)
 
 
 # --- Eye openness ------------------------------------------------------- #
