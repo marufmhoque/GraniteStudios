@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 BLEND_MODES = ("normal", "multiply", "screen", "overlay", "soft_light", "color_dodge", "luminosity")
 LAYER_KINDS = ("adjustment", "retouch", "pixel", "mask", "text", "shape")
 MASK_KINDS = ("none", "ai", "gradient", "radial", "luminance", "brush", "raster")
-RETOUCH_OPS = ("skin_smooth", "teeth_whiten", "eye_clarity")
+RETOUCH_OPS = ("skin_smooth", "teeth_whiten", "eye_clarity", "heal", "clone")
 
 ASSET_SUFFIX = ".granite.assets"
 
@@ -134,6 +134,7 @@ class Layer:
     asset: str = ""                                  # pixel: a file in the assets folder
     rect: list = field(default_factory=lambda: [0.0, 0.0, 1.0, 1.0])   # pixel
     vector: dict = field(default_factory=dict)       # text, shape
+    params: dict = field(default_factory=dict)       # retouch: spots or stamps
 
 
 def _number(raw: Any, default: float, low: float, high: float) -> float:
@@ -184,6 +185,7 @@ def layer_from_dict(data: Any) -> Layer | None:
         asset=Path(str(data.get("asset", ""))).name,
         rect=rect,
         vector=data.get("vector") if isinstance(data.get("vector"), dict) else {},
+        params=data.get("params") if isinstance(data.get("params"), dict) else {},
     )
 
 
@@ -390,6 +392,10 @@ def _retouch(image: np.ndarray, layer: Layer, ctx: RenderContext) -> np.ndarray 
     from src.ai_tools import retouch, segmentation
 
     rgb8 = np.round(np.clip(image, 0, 1) * 255).astype(np.uint8)
+    if layer.op == "heal":
+        return _heal(image, rgb8, layer)
+    if layer.op == "clone":
+        return _clone(image, layer)
     faces = ctx.faces(rgb8)
     if faces is None:
         ctx.note(f"{layer.op.replace('_', ' ')} needs the face models")
@@ -408,6 +414,65 @@ def _retouch(image: np.ndarray, layer: Layer, ctx: RenderContext) -> np.ndarray 
             eyes = ctx.ai_mask(rgb8, "eyes")
             iris = ctx.ai_mask(rgb8, "iris")
             return retouch.clarify_eyes(out, iris, eyes, amount) if iris is not None else None
+    return out
+
+
+def _heal(image: np.ndarray, rgb8: np.ndarray, layer: Layer) -> np.ndarray:
+    """Remove the spots a heal layer lists.
+
+    Spots are ``[x, y, radius]`` as fractions of the frame (the radius of
+    its long edge), so the same layer heals the same blemish at any size.
+    They are filled from their surroundings at render time rather than
+    stored as pixels, which keeps the layer tiny and resolution-free.
+    """
+    from src.ai_tools import retouch
+
+    h, w = image.shape[:2]
+    long_side = max(h, w)
+    spots = []
+    raw = layer.params.get("spots")
+    for spot in raw if isinstance(raw, list) else []:
+        try:
+            spots.append((float(spot[0]) * w, float(spot[1]) * h, max(1.0, float(spot[2]) * long_side)))
+        except (TypeError, ValueError, IndexError):
+            continue
+    if not spots:
+        return image
+    hole = np.zeros((h, w), np.uint8)
+    for x, y, radius in spots:
+        cv2.circle(hole, (int(round(x)), int(round(y))), int(round(radius)), 1, -1)
+    healed = retouch.heal_spots(rgb8, spots).astype(np.float32) / 255.0
+    soft = cv2.GaussianBlur(hole.astype(np.float32), (0, 0), 1.0)[:, :, None]
+    return image * (1.0 - soft) + healed * soft
+
+
+def _clone(image: np.ndarray, layer: Layer) -> np.ndarray:
+    """Copy round patches from one place to another.
+
+    Each stamp is ``{"source": [x, y], "target": [x, y], "radius": r,
+    "hardness": 0..1}`` in fractions of the frame.
+    """
+    h, w = image.shape[:2]
+    long_side = max(h, w)
+    out = image.copy()
+    stamps = layer.params.get("stamps")
+    for stamp in stamps if isinstance(stamps, list) else []:
+        if not isinstance(stamp, dict):
+            continue
+        sx, sy = _point(stamp.get("source"), (None, None))
+        tx, ty = _point(stamp.get("target"), (None, None))
+        if sx is None or tx is None:
+            continue
+        radius = max(2, int(round(_number(stamp.get("radius"), 0.02, 0.001, 0.5) * long_side)))
+        hardness = _number(stamp.get("hardness"), 0.5, 0.0, 1.0)
+        dx, dy = int(round((tx - sx) * w)), int(round((ty - sy) * h))
+        moved = cv2.warpAffine(image, np.float32([[1, 0, dx], [0, 1, dy]]), (w, h),
+                               borderMode=cv2.BORDER_REFLECT)
+        mask = np.zeros((h, w), np.float32)
+        cv2.circle(mask, (int(round(tx * w)), int(round(ty * h))), radius, 1.0, -1, lineType=cv2.LINE_AA)
+        if hardness < 0.98:
+            mask = cv2.GaussianBlur(mask, (0, 0), max(0.5, radius * (1.0 - hardness) * 0.5))
+        out = out * (1.0 - mask[:, :, None]) + moved * mask[:, :, None]
     return out
 
 

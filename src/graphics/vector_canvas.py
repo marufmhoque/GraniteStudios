@@ -709,6 +709,9 @@ def watermark_seal(name: str, tagline: str = "PHOTOGRAPHY", position: str = "bot
     cy = min(1.0 - half * 1.05, max(half * 1.05, cy + (-half if cy > 0.5 else half if cy < 0.5 else 0)))
     aspect = 2.0 / 3.0      # height over width of the assumed canvas
     ring_w, ring_h = diameter * aspect, diameter
+    # Shrink a long name to fit inside the ring. A bold capital is roughly
+    # 0.7 of the font size wide, and the inner ring is 0.88 of the diameter.
+    name_size = min(diameter * 0.135, 0.70 * diameter / (0.7 * max(len(name), 1)))
     return [Item(kind="group", name="Seal", x=cx - ring_w / 2, y=cy - ring_h / 2, w=ring_w, h=ring_h, children=[
         Item(kind="ellipse", x=cx - ring_w / 2, y=cy - ring_h / 2, w=ring_w, h=ring_h,
              fill=None, stroke=color, stroke_width=0.0022),
@@ -717,7 +720,7 @@ def watermark_seal(name: str, tagline: str = "PHOTOGRAPHY", position: str = "bot
         Item(kind="star", x=cx - ring_w * 0.07, y=cy - ring_h * 0.36, w=ring_w * 0.14, h=ring_h * 0.14,
              fill=color, points=5),
         Item(kind="text", text=name, x=cx, y=cy, anchor="center", align="center",
-             font_size=diameter * 0.135, bold=True, letter_spacing=104, fill=color),
+             font_size=name_size, bold=True, letter_spacing=104, fill=color),
         Item(kind="text", text=tagline, x=cx, y=cy + ring_h * 0.2, anchor="center", align="center",
              font_size=diameter * 0.052, letter_spacing=150, fill=color),
     ])]

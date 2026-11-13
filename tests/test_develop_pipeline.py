@@ -591,10 +591,12 @@ def test_a_raw_file_develops_to_linear_sixteen_bit():
         pytest.skip("sample not downloaded")
     source = dp.open_source(sample.path, half_size=True)
     assert source.is_raw and source.linear and source.data.dtype == np.uint16
-    recipe = Recipe()
-    recipe.basic.exposure = dp.auto_tone(source)
-    out = dp.render_preview(source, recipe, max_side=800)
+    assert 0.0 <= source.baseline <= 3.0
+    # An untouched RAW should look like a photograph, not a linear dump.
+    out = dp.render_preview(source, Recipe(), max_side=800)
     assert out.dtype == np.uint8 and 60 < out.mean() < 190, "the developed frame is implausibly dark or bright"
+    # The baseline is carried into previews, so they match the export.
+    assert source.proxy(400).baseline == source.baseline
 
 
 @pytest.mark.media

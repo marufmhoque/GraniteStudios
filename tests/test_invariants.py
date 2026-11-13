@@ -1,4 +1,5 @@
-"""INV-1: originals are never modified, moved or deleted.
+"""INV-1 and INV-7: originals are never modified, moved or deleted, and
+editing writes settings, not images, until something is exported.
 
 Every action that reads the library is driven through the real window and
 followed by a byte-for-byte comparison of the source folder. A second group
@@ -83,7 +84,11 @@ def test_grade(harness, before, mode_index):
     harness.select("IMG_0001.jpg", "IMG_0003.jpg")
     w.color_mode.setCurrentIndex(mode_index)
     harness.run(w._on_apply_color)
-    assert {"IMG_0001_graded.jpg", "IMG_0003_graded.jpg"} <= harness.edit_files()
+    # A grade is now a recipe setting: a sidecar, and no rendered image.
+    assert {"IMG_0001.jpg.granite.json", "IMG_0003.jpg.granite.json"} <= harness.edit_files()
+    assert not any(name.endswith(".jpg") for name in harness.edit_files())
+    graded = w.session.recipe(harness.folder / "IMG_0001.jpg")
+    assert graded.look.matrix is not None or min(graded.hsl.saturation) == -100.0
     assert_originals_untouched(before, harness.folder)
 
 
@@ -92,9 +97,11 @@ def test_auto_level(harness, before):
     w.level_body_check.setChecked(False)
     harness.select("IMG_0005.jpg")
     harness.run(w._on_auto_level)
-    assert "IMG_0005_level.jpg" in harness.edit_files(), (
+    recipe = w.session.recipe(harness.folder / "IMG_0005.jpg")
+    assert abs(recipe.geometry.rotation) > 3.0, (
         "the tilted facade was not straightened, so nothing was exercised"
     )
+    assert harness.edit_files() == {"IMG_0005.jpg.granite.json"}, "levelling rendered an image"
     assert_originals_untouched(before, harness.folder)
 
 
@@ -153,8 +160,8 @@ def test_rejected_frame_is_not_graded(harness, before):
     harness.select("IMG_0001.jpg", "IMG_0003.jpg")
     harness.run(harness.window._on_apply_color)
     files = harness.edit_files()
-    assert "IMG_0001_graded.jpg" in files
-    assert "IMG_0003_graded.jpg" not in files
+    assert "IMG_0001.jpg.granite.json" in files
+    assert "IMG_0003.jpg.granite.json" not in files
     assert (harness.folder / "IMG_0003.jpg").exists()
     assert_originals_untouched(before, harness.folder)
 
@@ -165,7 +172,7 @@ def test_rejected_frame_is_not_levelled(harness, before):
     harness.reject("IMG_0005.jpg")
     harness.select("IMG_0005.jpg")
     harness.run(w._on_auto_level)
-    assert "IMG_0005_level.jpg" not in harness.edit_files()
+    assert w.session.recipe(harness.folder / "IMG_0005.jpg").is_neutral
     assert_originals_untouched(before, harness.folder)
 
 
@@ -218,3 +225,62 @@ def test_video_operation_leaves_the_source_alone(tmp_path):
     result = timing.trim(source, out / "clip_trim.mp4", 0.2, 1.2)
     assert Path(result).stat().st_size > 0
     assert_originals_untouched(before, tmp_path)
+
+
+# --------------------------------------------------------------------- #
+# Export renders the edits; still nothing touches the originals
+# --------------------------------------------------------------------- #
+
+def _export(harness, preset="full"):
+    w = harness.window
+    combo = w.export.preset_combo
+    combo.setCurrentIndex(combo.findData(preset))
+    harness.run(w.export._on_export_files)
+    return sorted(harness.out_dir.iterdir())
+
+
+def test_export_renders_recipes_and_leaves_out_rejects(harness, before):
+    import cv2
+
+    w = harness.window
+    harness.select("IMG_0001.jpg", "IMG_0003.jpg", "IMG_0006.jpg")
+    w.color_mode.setCurrentIndex(1)                     # selective colour
+    harness.run(w._on_apply_color)
+    harness.reject("IMG_0006.jpg")
+    written = _export(harness)
+    assert [p.name for p in written] == ["IMG_0001.jpg", "IMG_0003.jpg"]
+    exported = cv2.imread(str(written[0]))
+    original = cv2.imread(str(harness.folder / "IMG_0001.jpg"))
+    spread = lambda img: float((img.max(axis=2).astype(int) - img.min(axis=2)).mean())  # noqa: E731
+    assert spread(exported) < spread(original) * 0.8, "the export does not show the edit"
+    assert_originals_untouched(before, harness.folder)
+
+
+def test_export_of_a_straightened_frame(harness, before):
+    import cv2
+
+    w = harness.window
+    w.level_body_check.setChecked(False)
+    harness.select("IMG_0005.jpg")
+    harness.run(w._on_auto_level)
+    written = _export(harness, "web")
+    image = cv2.imread(str(written[0]))
+    assert image.shape[1] < 800, "the straightened export was not cropped to clean corners"
+    assert_originals_untouched(before, harness.folder)
+
+
+def test_edits_and_marks_survive_reopening_the_folder(harness, before):
+    w = harness.window
+    harness.select("IMG_0001.jpg")
+    w.color_mode.setCurrentIndex(0)
+    harness.run(w._on_apply_color)
+    w.session.set_rating([str(harness.folder / "IMG_0003.jpg")], 4)
+    harness.reject("IMG_0006.jpg")
+    w.session.save_all()
+    w.cull.open_folder(harness.folder)
+    harness.wait()
+    key = str(harness.folder / "IMG_0001.jpg")
+    assert w.session.has_edits(key) and w.session.recipe(key).look.matrix is not None
+    assert w.session.ratings[str(harness.folder / "IMG_0003.jpg")] == 4
+    assert str(harness.folder / "IMG_0006.jpg") in w.rejected
+    assert_originals_untouched(before, harness.folder)

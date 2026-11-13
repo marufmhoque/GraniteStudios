@@ -408,3 +408,13 @@ def test_text_and_shape_layers_render_through_the_stack():
     assert tuple(out[60, 75]) == (255, 0, 0)
     right = out[:, 150:]
     assert 100 < right.max() < 200, "a half-opacity white text layer should land mid-grey"
+
+
+@pytest.mark.parametrize("name", ["M. HOQUE", "MARUF HOQUE", "ALEXANDRA MONTGOMERY-SMYTHE"])
+def test_a_seal_name_stays_inside_its_ring(name):
+    group = vc.watermark_seal(name, position="center")[0]
+    ring = vc.render_rgba([group.children[0]], (1500, 1000))[:, :, 3]
+    text = vc.render_rgba([group.children[3]], (1500, 1000))[:, :, 3]
+    ring_x = np.where(ring.max(axis=0) > 0.5)[0]
+    text_x = np.where(text.max(axis=0) > 0.5)[0]
+    assert ring_x.min() < text_x.min() and text_x.max() < ring_x.max()

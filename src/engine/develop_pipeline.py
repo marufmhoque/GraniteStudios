@@ -44,6 +44,7 @@ accelerated" is not claimed: this is vectorised NumPy and OpenCV on the CPU.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import math
 from dataclasses import dataclass, field
@@ -123,6 +124,10 @@ class Source:
     path: Path | None = None
     is_raw: bool = False
     note: str | None = None      # set when the load was a fallback
+    # Stops of brightening applied before the recipe's own exposure. A RAW
+    # file developed to linear light has no tone curve, so with none of
+    # this it looks a stop or two darker than the camera's own JPEG.
+    baseline: float = 0.0
 
     @property
     def size(self) -> tuple[int, int]:
@@ -145,7 +150,7 @@ class Source:
 
     def proxy(self, max_side: int) -> "Source":
         """A smaller copy, for interactive preview."""
-        return Source(fast_preview.fit(self.data, max_side), self.linear, self.path, self.is_raw, self.note)
+        return dataclasses.replace(self, data=fast_preview.fit(self.data, max_side))
 
 
 def from_array(array: np.ndarray, linear: bool = False) -> Source:
@@ -177,7 +182,11 @@ def open_source(path: str | Path, half_size: bool = False, hdr: bool = False) ->
                         use_camera_wb=True, half_size=half_size,
                         output_color=rawpy.ColorSpace.sRGB,
                     )
-                return Source(rgb, True, path, True)
+                source = Source(rgb, True, path, True)
+                # Measured once from the frame, so it is the same in every
+                # preview and export of it. Never darkens; at most 3 stops.
+                source.baseline = float(np.clip(auto_tone(source), 0.0, 3.0))
+                return source
             except Exception as exc:
                 preview = fast_preview.load_preview(path, max_side=None, exact=True)
                 if preview is None:
@@ -428,6 +437,7 @@ class Context:
     """Everything the full-size pass needs that was measured on the small copy."""
 
     full_size: tuple[int, int]
+    baseline: float = 0.0
     peak: float = 1.0
     light_blur: np.ndarray | None = None      # pre-tone luminance, blurred
     tone_blur: np.ndarray | None = None       # post-tone luminance, blurred
@@ -469,10 +479,10 @@ def _linear_stage(linear: np.ndarray, recipe: Recipe, ctx: Context, rows: slice)
         r2 = (xs[None, :] ** 2 + ys[:, None] ** 2) / 2.0
         linear = linear * (1.0 + (recipe.lens.vignette / 100.0) * 0.9 * r2)[:, :, None]
 
-    gain = np.float32(2.0 ** b.exposure)
+    gain = np.float32(2.0 ** (b.exposure + ctx.baseline))
     if b.temperature or b.tint:
         linear = linear * (white_balance_gains(b.temperature, b.tint) * gain)
-    elif b.exposure:
+    elif b.exposure or ctx.baseline:
         linear = linear * gain
     return linear
 
@@ -514,7 +524,7 @@ def _build_point_luts(source: Source, recipe: Recipe, ctx: Context, fold_tone: b
         return None
     b = recipe.basic
     gains = white_balance_gains(b.temperature, b.tint) if (b.temperature or b.tint) else np.ones(3, np.float32)
-    gains = gains * np.float32(2.0 ** b.exposure)
+    gains = gains * np.float32(2.0 ** (b.exposure + ctx.baseline))
     tables = []
     for channel in range(3):
         encoded = srgb_encode(roll_off(linear * gains[channel], ctx.peak))
@@ -538,11 +548,11 @@ def _encode_rows(source: Source, recipe: Recipe, ctx: Context, rows: slice) -> n
 
 def prepare(source: Source, recipe: Recipe) -> Context:
     """Measure the frame on a small copy and build every lookup table."""
-    ctx = Context(full_size=source.size)
+    ctx = Context(full_size=source.size, baseline=source.baseline)
     b = recipe.basic
     small = source.proxy(CONTEXT_SIDE)
     rows = slice(0, small.data.shape[0])
-    small_ctx = Context(full_size=small.size)
+    small_ctx = Context(full_size=small.size, baseline=source.baseline)
 
     if recipe.lens.profile and source.path is not None:
         ctx.vignette_gain = lens_vignette_gain(source.path, small.size)
@@ -998,7 +1008,7 @@ def correct_lens_geometry(source: Source) -> Source:
                     source.data[:, :, channel], coords[:, :, channel, 0], coords[:, :, channel, 1],
                     cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE,
                 )
-        return Source(out, source.linear, source.path, source.is_raw, source.note)
+        return dataclasses.replace(source, data=out)
     except Exception as exc:
         logger.debug("Lens geometry correction failed: %s", exc)
         return source
@@ -1016,7 +1026,7 @@ def manual_distortion(source: Source, amount: float) -> Source:
     map_x = (nx * scale) * (w / 2.0) + w / 2.0
     map_y = (ny * scale) * (h / 2.0) + h / 2.0
     out = cv2.remap(source.data, map_x, map_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
-    return Source(out, source.linear, source.path, source.is_raw, source.note)
+    return dataclasses.replace(source, data=out)
 
 
 # --------------------------------------------------------------------- #
@@ -1182,9 +1192,19 @@ def export(
     image = render(source, recipe, bits=bits, layers=layers, inpainter=inpainter)
     if max_side:
         image = fast_preview.fit(image, max_side)
+    return write_image(image, destination, fmt, quality, dpi)
 
+
+def write_image(image: np.ndarray, destination: str | Path, fmt: str = "jpeg",
+                quality: int = 92, dpi: int | None = None) -> Path:
+    """Encode a rendered RGB image to a file in one of ``EXPORT_FORMATS``."""
+    if fmt not in EXPORT_FORMATS:
+        raise ValueError(f"Unknown format {fmt!r}. Choose from: {', '.join(EXPORT_FORMATS)}")
+    destination = Path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    if bits == 16:
+    if fmt.endswith("16"):
+        if image.dtype != np.uint16:
+            image = image.astype(np.uint16) * 257
         if fmt == "tiff16":
             import tifffile
 
@@ -1197,6 +1217,8 @@ def export(
             destination.write_bytes(data.tobytes())
         return destination
 
+    if image.dtype != np.uint8:
+        image = (image >> 8).astype(np.uint8)
     from PIL import Image
 
     picture = Image.fromarray(image)
