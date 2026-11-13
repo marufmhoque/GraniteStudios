@@ -165,6 +165,7 @@ class Geometry:
     keystone_horizontal: float = 0.0
     crop: list | None = None
     constrain_to_image: bool = True   # trim the blank wedges rotation leaves
+    fill_blank: bool = False          # or, when not trimming, paint them in
 
 
 @dataclass
@@ -346,6 +347,7 @@ def from_dict(data: Any) -> Recipe:
     recipe.geometry.keystone_horizontal = _number("keystone", geometry.get("keystone_horizontal"), 0.0)
     recipe.geometry.crop = _crop(geometry.get("crop"))
     recipe.geometry.constrain_to_image = geometry.get("constrain_to_image", True) is not False
+    recipe.geometry.fill_blank = geometry.get("fill_blank") is True
 
     lens = _section(data.get("lens"))
     recipe.lens = Lens(

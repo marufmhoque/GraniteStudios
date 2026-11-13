@@ -860,8 +860,16 @@ def _largest_rect_inside(quad: np.ndarray, size: tuple[int, int]) -> tuple[int, 
     return x0, y0, max(1, int(math.floor(2 * half_w))), max(1, int(math.floor(2 * half_h)))
 
 
-def apply_geometry(image: np.ndarray, geometry: Geometry) -> np.ndarray:
-    """Turn, flip, straighten, correct keystone and crop."""
+def apply_geometry(image: np.ndarray, geometry: Geometry, with_coverage: bool = False):
+    """Turn, flip, straighten, correct keystone and crop.
+
+    With ``with_coverage`` the result is ``(image, coverage)``, where
+    coverage is 255 wherever the output shows the photograph and falls to 0
+    in the blank wedges a rotation leaves. It is computed from the
+    transform itself, so it is exact where judging blankness from pixel
+    values would miss the blended edge.
+    """
+    coverage = None
     if geometry.quarter_turns % 4:
         image = np.rot90(image, k=-(geometry.quarter_turns % 4))
     if geometry.flip_horizontal:
@@ -875,11 +883,15 @@ def apply_geometry(image: np.ndarray, geometry: Geometry) -> np.ndarray:
         matrix = _homography((w, h), geometry)
         image = cv2.warpPerspective(image, matrix, (w, h), flags=cv2.INTER_CUBIC,
                                     borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        if with_coverage:
+            coverage = cv2.warpPerspective(np.full((h, w), 255, np.uint8), matrix, (w, h),
+                                           flags=cv2.INTER_LINEAR, borderValue=0)
         if geometry.constrain_to_image:
             corners = np.array([[[0, 0], [w, 0], [w, h], [0, h]]], dtype=np.float64)
             quad = cv2.perspectiveTransform(corners, matrix)[0]
             x, y, cw, ch = _largest_rect_inside(quad, (w, h))
             image = image[y:y + ch, x:x + cw]
+            coverage = coverage[y:y + ch, x:x + cw] if coverage is not None else None
 
     if geometry.crop is not None:
         h, w = image.shape[:2]
@@ -888,7 +900,13 @@ def apply_geometry(image: np.ndarray, geometry: Geometry) -> np.ndarray:
         x1, y1 = int(round((x + cw) * w)), int(round((y + ch) * h))
         if x1 - x0 >= 2 and y1 - y0 >= 2:
             image = image[y0:y1, x0:x1]
-    return np.ascontiguousarray(image)
+            coverage = coverage[y0:y1, x0:x1] if coverage is not None else None
+    image = np.ascontiguousarray(image)
+    if not with_coverage:
+        return image
+    if coverage is None:
+        coverage = np.full(image.shape[:2], 255, np.uint8)
+    return image, np.ascontiguousarray(coverage)
 
 
 # --------------------------------------------------------------------- #
@@ -1010,7 +1028,7 @@ def _pixels_untouched(recipe: Recipe) -> bool:
     from src.engine.parametric_recipe import to_dict
 
     mine, neutral = to_dict(recipe), to_dict(Recipe())
-    return all(mine[key] == neutral[key] for key in mine if key not in ("geometry", "version", "vectors"))
+    return all(mine[key] == neutral[key] for key in mine if key not in ("geometry", "version", "vectors", "layers"))
 
 
 def _quantise(encoded: np.ndarray, bits: int) -> np.ndarray:
@@ -1019,12 +1037,58 @@ def _quantise(encoded: np.ndarray, bits: int) -> np.ndarray:
     return np.round(encoded * 255.0).astype(np.uint8)
 
 
-def render(source: Source, recipe: Recipe, bits: int = 8, geometry: bool = True) -> np.ndarray:
+def render(
+    source: Source,
+    recipe: Recipe,
+    bits: int = 8,
+    geometry: bool = True,
+    layers=None,
+    inpainter=None,
+) -> np.ndarray:
     """Render ``source`` through ``recipe`` to RGB of the given bit depth.
 
     The frame is processed in strips, so peak memory is one strip of float
     work on top of the source and the result, whatever the frame size.
+
+    ``layers`` is a ``layer_stack.RenderContext``; pass one to have the
+    recipe's layer stack applied (it supplies the models and files layers
+    may need). Without it the stack is skipped. ``inpainter`` is used to
+    fill the corners when the recipe asks for that.
     """
+    out = _render_pixels(source, recipe, bits)
+    if layers is not None and recipe.layers:
+        from src.engine import layer_stack
+
+        out = layer_stack.composite(out, layer_stack.layers_from_recipe(recipe), layers)
+    if not geometry:
+        return out
+    g = recipe.geometry
+    if g.fill_blank and not g.constrain_to_image and (g.rotation or g.keystone_vertical or g.keystone_horizontal):
+        out, coverage = apply_geometry(out, g, with_coverage=True)
+        return _fill_blank(out, coverage, inpainter)
+    return apply_geometry(out, g)
+
+
+def _fill_blank(image: np.ndarray, coverage: np.ndarray, inpainter) -> np.ndarray:
+    """Paint in the wedges straightening left, at the image's own bit depth."""
+    from src.ai_tools import retouch
+
+    # Anything not fully covered by the photograph, plus a pixel of margin
+    # for the cubic resampling that blended the edge.
+    hole = cv2.dilate((coverage < 254).astype(np.uint8), np.ones((3, 3), np.uint8), iterations=2)
+    if not hole.any():
+        return image
+    engine = inpainter or retouch._FastOnly()
+    if image.dtype == np.uint8:
+        return engine.fill(image, hole, engine="auto")[0]
+    # The fill works in 8 bits; only the wedges take its result, so the
+    # rest of a 16-bit frame keeps its precision.
+    filled = engine.fill((image >> 8).astype(np.uint8), hole, engine="auto")[0].astype(np.uint16) * 257
+    return np.where(hole[:, :, None] > 0, filled, image)
+
+
+def _render_pixels(source: Source, recipe: Recipe, bits: int) -> np.ndarray:
+    """The develop settings only: no layers, no framing."""
     if recipe.lens.profile:
         source = correct_lens_geometry(source)
     if recipe.lens.distortion:
@@ -1033,29 +1097,30 @@ def render(source: Source, recipe: Recipe, bits: int = 8, geometry: bool = True)
     if _pixels_untouched(recipe) and not source.linear and source.data.dtype == (
         np.uint16 if bits == 16 else np.uint8
     ):
-        # Nothing to compute: hand back the pixels as they are.
-        return apply_geometry(source.data, recipe.geometry) if geometry else source.data.copy()
+        return source.data.copy()       # nothing to compute
 
     ctx = prepare(source, recipe)
     width, height = source.size
     if _only_point_operations(recipe, ctx):
         tables = [_quantise(np.clip(table, 0.0, 1.0), bits) for table in ctx.point_luts]
         if source.data.dtype == np.uint8 and bits == 8:
-            out = cv2.LUT(source.data, np.stack(tables, axis=-1).reshape(256, 1, 3))
-        else:
-            out = np.stack([tables[c][source.data[:, :, c]] for c in range(3)], axis=-1)
-        return apply_geometry(out, recipe.geometry) if geometry else out
+            return cv2.LUT(source.data, np.stack(tables, axis=-1).reshape(256, 1, 3))
+        return np.stack([tables[c][source.data[:, :, c]] for c in range(3)], axis=-1)
 
     out = np.empty((height, width, 3), dtype=np.uint16 if bits == 16 else np.uint8)
     for y0 in range(0, height, STRIP_ROWS):
         rows = slice(y0, min(height, y0 + STRIP_ROWS))
         out[rows] = _quantise(_render_rows(source, recipe, ctx, rows), bits)
-    return apply_geometry(out, recipe.geometry) if geometry else out
+    return out
 
 
-def render_preview(source: Source, recipe: Recipe, max_side: int = 1600) -> np.ndarray:
-    """An 8-bit preview no larger than ``max_side``, for the interface."""
-    return render(source.proxy(max_side), recipe, bits=8)
+def render_preview(source: Source, recipe: Recipe, max_side: int = 1600, layers=None) -> np.ndarray:
+    """An 8-bit preview no larger than ``max_side``, for the interface.
+
+    Corners are filled with the fast engine here even when the export will
+    use the neural one, so a preview is never held up for seconds.
+    """
+    return render(source.proxy(max_side), recipe, bits=8, layers=layers)
 
 
 def auto_tone(source: Source) -> float:
@@ -1086,6 +1151,8 @@ def export(
     quality: int = 92,
     max_side: int | None = None,
     dpi: int | None = None,
+    layers=None,
+    inpainter=None,
 ) -> Path:
     """Render a photograph through its recipe and write the result.
 
@@ -1101,7 +1168,7 @@ def export(
     if source is None:
         raise IOError(f"Could not read {path}")
     bits = 16 if fmt.endswith("16") else 8
-    image = render(source, recipe, bits=bits)
+    image = render(source, recipe, bits=bits, layers=layers, inpainter=inpainter)
     if max_side:
         image = fast_preview.fit(image, max_side)
 
