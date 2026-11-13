@@ -62,7 +62,12 @@ jobs:
             --hidden-import fastapi \
             --hidden-import uvicorn \
             --hidden-import pydantic \
-            --collect-data imageio_ffmpeg
+            --hidden-import lensfunpy \
+            --hidden-import tifffile \
+            --hidden-import scipy.interpolate \
+            --hidden-import PyQt6.QtSvg \
+            --collect-data imageio_ffmpeg \
+            --collect-data lensfunpy
 
       - name: Install create-dmg
         run: brew install create-dmg

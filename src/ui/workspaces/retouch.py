@@ -109,17 +109,21 @@ class RetouchWorkspace(Workspace):
         rail.addWidget(self.brush_hardness)
         rail.addSpacing(12)
         rail.addWidget(QLabel("Portrait"))
+        self.portrait_buttons = []
         for label, op, tip in (("Smooth Skin", "skin_smooth", "Even out skin; pores are kept"),
                                ("Whiten Teeth", "teeth_whiten", "Take the yellow out of teeth"),
                                ("Brighten Eyes", "eye_clarity", "Add clarity to the irises")):
-            rail.addWidget(self._button(label, lambda _c=False, o=op: self._add_retouch(o), tip))
+            button = self._button(label, lambda _c=False, o=op: self._add_retouch(o), tip)
+            self.portrait_buttons.append(button)
+            rail.addWidget(button)
         rail.addSpacing(12)
         rail.addWidget(QLabel("Adjust an area"))
         self.ai_kind = QComboBox()
         self.ai_kind.addItems(AI_KINDS)
         rail.addWidget(self.ai_kind)
-        rail.addWidget(self._button("New Layer from Mask", self._add_ai_layer,
-                                    "Create an adjustment layer limited to this kind of area"))
+        self.ai_button = self._button("New Layer from Mask", self._add_ai_layer,
+                                      "Create an adjustment layer limited to this kind of area")
+        rail.addWidget(self.ai_button)
         rail.addWidget(self._button("New Brushed Layer", self._add_brush_layer,
                                     "An adjustment layer you paint where it applies"))
         rail.addWidget(self._button("New Gradient Layer", self._add_gradient_layer,
@@ -410,22 +414,27 @@ class RetouchWorkspace(Workspace):
         self._commit()
 
     def _add_retouch(self, op: str) -> None:
-        self._add(layer_stack.Layer(kind="retouch", op=op, amount=50.0))
+        from src.ai_tools import face_mesh
+        from src.ai_tools.face_analysis import MODEL_SPEC as FACE_SPEC
+
+        def add() -> None:
+            self._segmenter, self._context = None, None
+            self._add(layer_stack.Layer(kind="retouch", op=op, amount=50.0))
+
+        self.shell.with_models([FACE_SPEC, face_mesh.MESH_SPEC], "Portrait retouching", add,
+                               self.portrait_buttons[0])
 
     def _add_ai_layer(self) -> None:
         kind = self.ai_kind.currentText()
         from src.ai_tools.segmentation import PARTIAL_KINDS, Segmenter
 
-        if Segmenter.download_mb(kind) > 0:
-            QMessageBox.information(
-                self, "Model needed",
-                f"The {kind} mask needs a model that is not on this computer yet "
-                f"({Segmenter.download_mb(kind):.0f} MB). It is fetched the first time "
-                "a feature that needs it is switched on.")
-            return
-        name = f"Adjust {kind}" + (" (approximate)" if kind in PARTIAL_KINDS else "")
-        self._add(layer_stack.Layer(kind="adjustment", name=name, recipe={"basic": {}},
-                                    mask=layer_stack.Mask(kind="ai", params={"kind": kind}, feather=0.003)))
+        def add() -> None:
+            self._context = None        # pick up the newly available model
+            name = f"Adjust {kind}" + (" (approximate)" if kind in PARTIAL_KINDS else "")
+            self._add(layer_stack.Layer(kind="adjustment", name=name, recipe={"basic": {}},
+                                        mask=layer_stack.Mask(kind="ai", params={"kind": kind}, feather=0.003)))
+
+        self.shell.with_models(Segmenter.models_for(kind), f"Selecting {kind}", add, self.ai_button)
 
     def _add_brush_layer(self) -> None:
         self._add(layer_stack.Layer(kind="adjustment", name="Brushed adjustment", recipe={"basic": {}},
@@ -540,9 +549,10 @@ class RetouchWorkspace(Workspace):
         from src.ai_tools.segmentation import SAM_SPEC
 
         if not model_store.is_cached(SAM_SPEC):
-            QMessageBox.information(
-                self, "Model needed",
-                f"Click-to-select needs a {SAM_SPEC.size / 1e6:.0f} MB model that is not on this computer yet.")
+            def ready() -> None:
+                self._segmenter, self._context = None, None
+                self._click_select(x, y)
+            self.shell.with_models([SAM_SPEC], "Click-to-select", ready, self.ai_button)
             return
         layer = self._selected_layer()
         if layer is not None and layer.mask.kind == "ai" and layer.mask.params.get("kind") == "click":

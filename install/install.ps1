@@ -287,6 +287,11 @@ Write-Host ''
 # so relying on the transcript alone would lose exactly the detail that
 # matters. Abort folds this file into the main log.
 & $VenvPy -m pip install --upgrade pip --quiet --disable-pip-version-check --log $PipLog
+# 2.0 moved Windows to the DirectML build of ONNX Runtime. Both builds install
+# into the same 'onnxruntime' folder, so an upgrade that left the old one in
+# place would have two packages fighting over the same files. Removing it is
+# a no-op on a fresh install.
+& $VenvPy -m pip uninstall -y onnxruntime --quiet --disable-pip-version-check --log $PipLog 2>$null
 & $VenvPy -m pip install -r (Join-Path $InstallDir 'requirements.txt') --disable-pip-version-check --log $PipLog
 if ($LASTEXITCODE -ne 0) {
     Write-Host ''
@@ -305,12 +310,12 @@ Say 'Fetching the background-removal AI model...'
 & $VenvPy -c "from rembg import new_session; new_session()" 2>$null | Out-Null
 if ($LASTEXITCODE -eq 0) { Ok 'AI model ready.' } else { Warn 'Model will download on first use instead.' }
 
-# Face detector for blink detection (~230KB, checksum-pinned). Also optional.
-Say 'Fetching the face-detection model (for blink detection)...'
+# Face detector and face mesh for blink and smile detection (~4MB, checksum-pinned). Optional.
+Say 'Fetching the face models (for blink and smile detection, about 4MB)...'
 $prevEA = $ErrorActionPreference
 $ErrorActionPreference = 'Continue'
 Push-Location $InstallDir
-& $VenvPy -c "import sys; sys.path.insert(0,'.'); from src.ai_tools.face_analysis import ensure_model; sys.exit(0 if ensure_model() else 1)" 2>$null | Out-Null
+& $VenvPy -c "import sys; sys.path.insert(0,'.'); from src.ai_tools.face_analysis import ensure_model; from src.ai_tools import face_mesh, model_store; sys.exit(0 if ensure_model() and model_store.ensure_model(face_mesh.MESH_SPEC) else 1)" 2>$null | Out-Null
 $faceOk = ($LASTEXITCODE -eq 0)
 Pop-Location
 $ErrorActionPreference = $prevEA

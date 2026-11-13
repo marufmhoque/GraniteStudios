@@ -252,6 +252,47 @@ class MainWindow(QMainWindow):
         self._task_worker.failed.connect(_fail)
         self._task_worker.start()
 
+    def with_models(self, specs, purpose: str, then, busy_button: QPushButton) -> None:
+        """Run ``then()`` once the given models are on this computer.
+
+        If any are missing the user is told what they are for and how large
+        they are, and asked. Nothing is fetched without a yes; a no leaves
+        the feature unavailable rather than half-working.
+        """
+        from src.ai_tools import model_store
+
+        missing = [spec for spec in specs if not model_store.is_cached(spec)]
+        if not missing:
+            then()
+            return
+        size = model_store.total_download_mb(missing)
+        answer = QMessageBox.question(
+            self,
+            "Download a model?",
+            f"{purpose} needs {len(missing)} model file(s), about {size:.0f} MB in total.\n\n"
+            "They are downloaded once, checked against a known fingerprint and kept on this "
+            "computer. Nothing is uploaded, and your photos stay on this machine.\n\n"
+            "Download now?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            self.status_label.setText(f"{purpose} needs a model that was not downloaded.")
+            return
+        self.status_label.setText(f"Downloading {size:.0f} MB for {purpose.lower()}…")
+
+        def work():
+            return model_store.ensure_models(missing, download=True) is not None
+
+        def done(ok):
+            if ok:
+                then()
+            else:
+                QMessageBox.warning(self, "Download failed",
+                                    "The model could not be fetched. Check the connection and try again.")
+
+        self._run_task(work, done, busy_button)
+
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt naming)
         self.current_workspace.on_leave()
         self.session.save_all()

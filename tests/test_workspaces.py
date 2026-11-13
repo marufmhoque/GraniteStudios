@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -340,3 +341,74 @@ def test_design_overlays_appear_in_the_export(harness, before):
     assert exported is not None, (w.status_label.text(), harness.messages, sorted(harness.out_dir.iterdir()))
     assert tuple(int(v) for v in exported[20, 20]) == pytest.approx((0, 0, 255), abs=3)
     assert_originals_untouched(before, harness.folder)
+
+
+# --------------------------------------------------------------------- #
+# Models are fetched only with consent; people are grouped locally
+# --------------------------------------------------------------------- #
+
+def test_declining_a_model_download_fetches_nothing(harness, tmp_path, monkeypatch):
+    from PyQt6.QtWidgets import QMessageBox
+
+    from src.ai_tools import model_store
+    from src.ai_tools.segmentation import SAM_SPEC
+
+    monkeypatch.setattr(model_store, "MODEL_DIR", tmp_path / "models")
+    monkeypatch.setattr(QMessageBox, "question", staticmethod(lambda *a, **k: QMessageBox.StandardButton.No))
+    fetched = []
+    monkeypatch.setattr(model_store, "_fetch", lambda *a, **k: fetched.append(a) or b"")
+    ran = []
+    harness.window.with_models([SAM_SPEC], "Testing", lambda: ran.append(True), harness.window.load_button)
+    harness.wait()
+    assert not ran and not fetched
+    assert "not downloaded" in harness.window.status_label.text()
+
+
+def test_models_already_present_need_no_question(harness, monkeypatch):
+    from PyQt6.QtWidgets import QMessageBox
+
+    asked = []
+    monkeypatch.setattr(QMessageBox, "question", staticmethod(lambda *a, **k: asked.append(a)))
+    ran = []
+    harness.window.with_models([], "Testing", lambda: ran.append(True), harness.window.load_button)
+    assert ran == [True] and not asked
+
+
+@pytest.mark.model
+@pytest.mark.media
+@pytest.mark.slow
+def test_group_by_person_end_to_end(harness, tmp_path, before):
+    from src.ai_tools import person_clustering
+
+    if not (person_clustering.FaceEmbedder.is_cached() and face("pose.png").present
+            and face("grace_hopper_227.png").present):
+        pytest.skip("recognition model or reference faces not present")
+    w = harness.window
+    folder = tmp_path / "Event"
+    folder.mkdir()
+    for name, sample, change in (("a.jpg", "pose.png", None), ("b.jpg", "pose.png", "bright"),
+                                 ("c.jpg", "grace_hopper_227.png", None), ("d.jpg", "grace_hopper_227.png", "bright")):
+        image = cv2.resize(cv2.imread(str(face(sample).path)), None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+        if change:
+            image = cv2.convertScaleAbs(image, alpha=1.1, beta=10)
+        write_jpeg(folder / name, image)
+    folder_before = snapshot(folder)
+    w.cull.open_folder(folder)
+    harness.wait()
+    harness.run(w.cull._on_group_people)
+    people = w.session.people
+    assert people is not None and len(people.people) == 2
+    groups = sorted(sorted(Path(p).name for p in people.paths_of(pid)) for pid in people.people)
+    assert groups == [["a.jpg", "b.jpg"], ["c.jpg", "d.jpg"]]
+
+    w.cull.person_filter.setCurrentIndex(1)
+    shown = [k for k, cell in w.cull.cells.items() if not cell.isHidden()]
+    assert len(shown) == 2
+    people.rename(w.cull.person_filter.currentData(), "Bride")
+    people.save(w.edit_folder)
+    assert person_clustering.PeopleIndex.load(w.edit_folder).label(w.cull.person_filter.currentData()) == "Bride"
+
+    w.cull._on_forget_people()
+    assert not (w.edit_folder / person_clustering.INDEX_FILENAME).exists()
+    assert w.session.people is None and w.cull.person_filter.count() == 1
+    assert_originals_untouched(folder_before, folder)

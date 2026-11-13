@@ -46,6 +46,11 @@ HIDDEN_IMPORTS = [
     "fastapi",
     "uvicorn",
     "pydantic",
+    # Added in 2.0.
+    "lensfunpy",
+    "tifffile",
+    "scipy.interpolate",
+    "PyQt6.QtSvg",
 ]
 
 ICO_SIZES = [(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
@@ -128,6 +133,8 @@ def build() -> None:
     # PyInstaller's import analysis can't see it, so it has to be collected
     # explicitly or the packaged app has no working video engine.
     args += ["--collect-data", "imageio_ffmpeg"]
+    # The lens-correction database is XML shipped as package data, likewise.
+    args += ["--collect-data", "lensfunpy"]
 
     print("Running PyInstaller with:")
     print("  " + " ".join(args))

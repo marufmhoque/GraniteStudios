@@ -506,6 +506,16 @@ class DevelopWorkspace(Workspace):
         self.recipe.geometry.fill_blank = text == "Fill"
         self._changed()
         self._commit()
+        from src.ai_tools import retouch
+
+        if text == "Fill" and not retouch.Inpainter.is_cached() and not getattr(self, "_asked_fill", False):
+            # Offered once: the quick fill works without it, the neural one
+            # invents texture where the quick one smears.
+            self._asked_fill = True
+            self.shell.with_models(
+                [retouch.LAMA_SPEC], "Filling corners with invented texture (otherwise a quick smear fill is used)",
+                lambda: self.status_label.setText("The neural fill will be used at export."),
+                self.compare_button)
 
     def _on_aspect(self, text: str) -> None:
         if self.source is None:

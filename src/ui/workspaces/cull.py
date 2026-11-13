@@ -185,6 +185,78 @@ class CullWorkspace(Workspace):
             return super().keyPressEvent(event)
         event.accept()
 
+    # -- people ------------------------------------------------------------------- #
+
+    def _refresh_people(self) -> None:
+        people = self.session.people
+        self.person_filter.blockSignals(True)
+        current = self.person_filter.currentData()
+        self.person_filter.clear()
+        self.person_filter.addItem("Everyone", None)
+        if people is not None:
+            for person in people.by_size():
+                self.person_filter.addItem(f"{people.label(person)} ({len(people.paths_of(person))})", person)
+        index = self.person_filter.findData(current)
+        self.person_filter.setCurrentIndex(max(0, index))
+        self.person_filter.blockSignals(False)
+        self._apply_view_filter()
+
+    def _on_group_people(self) -> None:
+        if not self._require_library():
+            return
+        from src.ai_tools import face_mesh, person_clustering
+        from src.ai_tools.face_analysis import MODEL_SPEC as FACE_SPEC
+
+        paths = list(self.image_paths)
+
+        def run() -> None:
+            self.status_label.setText(f"Recognising faces in {len(paths)} photo(s)…")
+
+            def work():
+                embedder = person_clustering.FaceEmbedder(download=False)
+                frames = self.culler.score_frames(paths, check_eyes=True, embedder=embedder)
+                index, matrix = person_clustering.cluster_frames(frames)
+                index.save(self.edit_folder, matrix)
+                return index
+
+            def done(index):
+                self.session.people = index
+                self._refresh_people()
+                self.status_label.setText(
+                    f"Found {len(index.people)} people appearing in more than one photo"
+                    + (f"; {len(index.unassigned)} face(s) seen only once" if index.unassigned else "")
+                    + ". Pick someone under “Everyone” to see their photos; “Name…” to label them.")
+
+            self._run_task(work, done, self.people_button)
+
+        self.shell.with_models([FACE_SPEC, face_mesh.MESH_SPEC, person_clustering.SFACE_SPEC],
+                               "Grouping by person", run, self.people_button)
+
+    def _on_rename_person(self) -> None:
+        from PyQt6.QtWidgets import QInputDialog
+
+        person = self.person_filter.currentData()
+        people = self.session.people
+        if person is None or people is None:
+            QMessageBox.information(self, "Name a person", "Choose a person from the list first.")
+            return
+        name, ok = QInputDialog.getText(self, "Name this person", "Name:", text=people.names.get(person, ""))
+        if ok:
+            people.rename(person, name)
+            people.save(self.edit_folder)
+            self._refresh_people()
+
+    def _on_forget_people(self) -> None:
+        from src.ai_tools import person_clustering
+
+        if self.edit_folder is None:
+            return
+        removed = person_clustering.PeopleIndex.forget(self.edit_folder)
+        self.session.people = None
+        self._refresh_people()
+        self.status_label.setText(
+            f"Removed {removed} file(s) of face data for this folder. Your photos were not touched.")
+
     # -- survey: several frames side by side, zoom locked together ------------- #
 
     def _toggle_survey(self) -> None:
@@ -344,6 +416,11 @@ class CullWorkspace(Workspace):
             ["All", "Keepers only", "AI picks (starred)", "Duplicates",
              "Rejected", "Blurry", "Motion blur", "Out of focus"]
         )
+        self.person_filter = QComboBox()
+        self.person_filter.addItem("Everyone", None)
+        self.person_filter.setToolTip("Show only the photographs a person appears in")
+        self.person_filter.setMinimumWidth(150)
+        self.person_filter.currentIndexChanged.connect(self._apply_view_filter)
         self.view_filter.setToolTip("Filter which photos the grid shows.")
         self.view_filter.currentIndexChanged.connect(self._apply_view_filter)
         sel_row.addWidget(self.view_filter)
@@ -593,6 +670,23 @@ class CullWorkspace(Workspace):
         keys.setObjectName("PageSubtitle")
         view_row.addWidget(self.survey_button)
         view_row.addWidget(self.loupe_button)
+        self.people_button = QPushButton("Group by Person")
+        self.people_button.setObjectName("SecondaryButton")
+        self.people_button.setToolTip(
+            "Recognise faces across the folder and group the photos by who is in them. "
+            "Everything stays on this computer; names are yours to give.")
+        self.people_button.clicked.connect(self._on_group_people)
+        view_row.addWidget(self.people_button)
+        view_row.addWidget(self.person_filter)
+        self.rename_person_button = QPushButton("Name…")
+        self.rename_person_button.setObjectName("SecondaryButton")
+        self.rename_person_button.clicked.connect(self._on_rename_person)
+        view_row.addWidget(self.rename_person_button)
+        self.forget_button = QPushButton("Forget Faces")
+        self.forget_button.setObjectName("SecondaryButton")
+        self.forget_button.setToolTip("Delete everything stored about faces for this folder")
+        self.forget_button.clicked.connect(self._on_forget_people)
+        view_row.addWidget(self.forget_button)
         view_row.addSpacing(12)
         view_row.addWidget(keys)
         view_row.addStretch()
@@ -1052,6 +1146,10 @@ class CullWorkspace(Workspace):
         )
 
     def _passes_view_filter(self, path: str) -> bool:
+        person = self.person_filter.currentData() if hasattr(self, "person_filter") else None
+        if person is not None and self.session.people is not None:
+            if path not in self.session.people.paths_of(person):
+                return False
         mode = self.view_filter.currentText() if hasattr(self, "view_filter") else "All"
         is_rejected = path in self.rejected
         if mode == "All":
@@ -1141,6 +1239,11 @@ class CullWorkspace(Workspace):
             self.cells[str(path)] = cell
         self._refresh_marks()
         self._show_current()
+        from src.ai_tools import person_clustering
+
+        people = person_clustering.PeopleIndex.load(self.edit_folder)
+        self.session.people = people if people.people else None
+        self._refresh_people()
 
         self.progress.setVisible(True)
         self.progress.setMaximum(len(self.image_paths))
