@@ -16,6 +16,10 @@ from pathlib import Path
 
 # Qt must be told to run headless before anything imports it.
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+# Headless Qt has no fonts of its own; without this every glyph is a box.
+_fonts = os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts")
+if os.path.isdir(_fonts):
+    os.environ.setdefault("QT_QPA_FONTDIR", _fonts)
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:

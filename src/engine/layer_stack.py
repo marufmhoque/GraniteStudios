@@ -232,6 +232,7 @@ class RenderContext:
     segmenter: Any = None                       # segmentation.Segmenter
     assets: Path | None = None                  # folder holding pixel-layer patches
     vector_renderer: Callable | None = None     # (vector dict, (w, h)) -> RGBA float
+    metadata: Any = None                        # the photograph's EXIF, for text tokens
     notes: list = field(default_factory=list)   # why a layer was skipped
     _masks: dict = field(default_factory=dict)
     _faces: Any = None
@@ -494,10 +495,13 @@ def composite(image: np.ndarray, layers: list[Layer], ctx: RenderContext | None 
                 top, own_alpha = found
                 alpha = alpha * own_alpha
             else:   # text, shape
-                if ctx.vector_renderer is None:
-                    ctx.note("text and shape layers need the vector canvas")
-                    continue
-                drawn = ctx.vector_renderer(layer.vector, size)
+                renderer = ctx.vector_renderer
+                if renderer is None:
+                    from src.graphics import vector_canvas
+
+                    renderer = vector_canvas.render_layer
+                drawn = renderer({"kind": layer.kind, **layer.vector} if "kind" not in layer.vector
+                                 else layer.vector, size)
                 if drawn is None:
                     continue
                 top, alpha = drawn[:, :, :3], alpha * drawn[:, :, 3]

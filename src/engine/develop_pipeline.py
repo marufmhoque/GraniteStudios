@@ -1065,8 +1065,19 @@ def render(
     g = recipe.geometry
     if g.fill_blank and not g.constrain_to_image and (g.rotation or g.keystone_vertical or g.keystone_horizontal):
         out, coverage = apply_geometry(out, g, with_coverage=True)
-        return _fill_blank(out, coverage, inpainter)
-    return apply_geometry(out, g)
+        out = _fill_blank(out, coverage, inpainter)
+    else:
+        out = apply_geometry(out, g)
+    if recipe.vectors:
+        # Watermarks and captions go on last, over the final framing, so
+        # they sit in the corner of what is delivered rather than of what
+        # was shot.
+        from src.graphics import vector_canvas
+
+        out = vector_canvas.composite_onto(
+            out, vector_canvas.items_from(recipe.vectors), getattr(layers, "metadata", None)
+        )
+    return out
 
 
 def _fill_blank(image: np.ndarray, coverage: np.ndarray, inpainter) -> np.ndarray:

@@ -257,11 +257,10 @@ def test_a_layer_that_cannot_render_is_skipped_and_explained(tmp_path):
     out = ls.composite(image, _layers(
         {"kind": "pixel", "asset": "missing.png"},
         {"kind": "retouch", "op": "skin_smooth"},
-        {"kind": "text", "vector": {"text": "hello"}},
         _adjust(1.0),
     ), ctx)
     assert out[0, 0, 0] > 150, "the layers that could render were not applied"
-    assert len(ctx.notes) == 3
+    assert len(ctx.notes) == 2
 
 
 def test_blend_mode_is_used_when_compositing():
