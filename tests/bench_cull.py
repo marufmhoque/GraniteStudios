@@ -16,8 +16,8 @@ files from a memory card or a hard disk.
 
 Recorded results
 ----------------
-13 November 2026. Intel Core i5, 8th generation U-series (4 cores, 8
-threads), 32 GB RAM, 7 workers. 1,000 frames per run, eye checking on (face
+13 November 2026. Intel Core i5-8350U (4 cores, 8 threads) -- the
+project's stated minimum processor -- with 32 GB RAM, 7 workers. 1,000 frames per run, eye checking on (face
 detection, 478-point mesh, keeper score). Seconds per 1,000 frames:
 
     camera                 embedded preview   first build   final

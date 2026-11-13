@@ -21,6 +21,9 @@ dependencies = [
     "fastapi",
     "pydantic",
     "uvicorn[standard]",
+    "scipy",
+    "tifffile",
+    "lensfunpy",
 ]
 
 [project.optional-dependencies]

@@ -13,3 +13,6 @@ imageio-ffmpeg
 fastapi
 pydantic
 uvicorn[standard]
+scipy
+tifffile
+lensfunpy
