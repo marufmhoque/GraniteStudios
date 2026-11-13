@@ -6,6 +6,8 @@ One file. Download it, double-click it, done — it fetches the latest version
 and installs it for you. Re-run the same file any time to update.
 [![Publish installer](https://github.com/marufmhoque/GraniteStudios/actions/workflows/installer.yml/badge.svg)](https://github.com/marufmhoque/GraniteStudios/actions/workflows/installer.yml)
 
+> **📋 [Product Requirements Document (PRD.md)](PRD.md)** — who it is for, the invariants it must never break (originals are never modified or deleted), every requirement with its measured evidence, known limitations, and the roadmap.
+
 ---
 
 **Local-first AI photo and video editing suite** for photographers and content creators. Designed to run smoothly on modest hardware (i5-8350U + 32GB RAM), but scales to powerful machines with CUDA or Apple Silicon.
@@ -393,6 +395,8 @@ See [README_INSTALL.md](README_INSTALL.md) for Windows SmartScreen and macOS Gat
 - Web publisher resizes once per batch, so large exports finish in seconds
 
 ## Roadmap
+
+The full specification — requirements with acceptance criteria, non-functional requirements, architecture, and the target state with each item's actual blocker — lives in **[PRD.md](PRD.md)**. The tables below are the short version.
 
 Granite Studios is being measured against a reference spec for a
 high-volume photographer workflow (AI culling, AI editing, AI retouching,
