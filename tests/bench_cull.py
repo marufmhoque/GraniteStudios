@@ -13,6 +13,44 @@ and after the first read it comes from the operating system's cache. That
 makes this a measurement of decode and analysis throughput, which is what
 the code controls. It is not a measurement of reading a thousand different
 files from a memory card or a hard disk.
+
+Recorded results
+----------------
+13 November 2026. Intel Core i5, 8th generation U-series (4 cores, 8
+threads), 32 GB RAM, 7 workers. 1,000 frames per run, eye checking on (face
+detection, 478-point mesh, keeper score). Seconds per 1,000 frames:
+
+    camera                 embedded preview   first build   final
+    Sony a6400 (ARW)          1616 x 1080         100          42
+    Samsung S10 (DNG)         4016 x 1892          95          51
+    Olympus E-M1 II (ORF)     3200 x 2400         115          53
+    Canon EOS R6 (CR3)        3408 x 2272         111          61
+    Panasonic GH5S (RW2)      1920 x 1920         163          85
+    Fujifilm X-S10 (RAF)      4416 x 2944         166          91
+    Nikon Z50 II (NEF)        3712 x 3712         224          96
+    Canon 5D IV (CR2)         6720 x 4480         258         100
+    Pentax K-1 II (PEF)       4800 x 3200         151         104
+
+Against a 90 second target that is five of nine cameras. Against the earlier
+five minute target it is all nine. The Panasonic frame contains two faces,
+which is why a small preview still costs 85 s: each face adds a mesh pass.
+
+Two files have no usable embedded preview and are developed at half size
+instead. First build only, not re-run: iPhone XS DNG 291 s, Hasselblad H3D
+616 s per 1,000.
+
+"First build" decoded each preview once in colour at full size. "Final"
+decodes greyscale at full size for sharpness and reduced colour for faces,
+and finds faces on an 800 px copy.
+
+What did not help, so it is not tried again blind: running OpenCV
+single-threaded inside each worker (under 3 percent), and finding faces at
+640 px instead of 800 (about 8 percent, at the cost of small faces).
+Measuring faces on the greyscale decode alone would remove a decode, but it
+moved the eye aspect ratio on two of four reference faces (0.155 to 0.227 on
+one), so the thresholds would no longer hold.
+
+For comparison, fully developing one of these files takes 0.8 to 7.8 s.
 """
 
 from __future__ import annotations

@@ -214,8 +214,20 @@ class _FaceJudge:
             analyzer = self._local.analyzer = self._factory(download=False)
         return analyzer
 
-    def annotate(self, frame: "CullResult", rgb: np.ndarray) -> None:
-        """Measure every face in ``rgb`` and record it on ``frame``."""
+    def annotate(
+        self,
+        frame: "CullResult",
+        rgb: np.ndarray,
+        sharp_gray: np.ndarray | None = None,
+        sharp_scale: float = 1.0,
+    ) -> None:
+        """Measure every face in ``rgb`` and record it on ``frame``.
+
+        Face boxes are reported in ``rgb``'s pixels. When ``sharp_gray`` is
+        given -- a full-resolution greyscale of the same frame, larger by
+        ``sharp_scale`` -- face sharpness is measured there instead, so it
+        is not blunted by the reduced decode ``rgb`` came from.
+        """
         bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
         height, width = bgr.shape[:2]
         frame.eyes_checked = True
@@ -234,6 +246,12 @@ class _FaceJudge:
             return
 
         gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+        if sharp_gray is None:
+            sharp_gray, sharp_scale = gray, 1.0
+
+        def region(box) -> float:
+            return _region_sharpness(sharp_gray, tuple(int(round(v * sharp_scale)) for v in box))
+
         largest = max(max(f.w, f.h) for f in faces)
         observations: list[FaceObservation] = []
         for face in faces:
@@ -251,14 +269,14 @@ class _FaceJudge:
                 seen.smile = measured.smile
                 seen.mouth_open = measured.mouth_is_open
                 seen.roll_deg = measured.roll_deg
-                seen.sharpness = _region_sharpness(gray, measured.eye_box())
+                seen.sharpness = region(measured.eye_box())
             else:
                 if detector is not None:
                     detector.measure_eyes(gray, face)
                 if face.eyes_measured:
                     seen.eye_openness = face.min_openness
                     seen.eyes_closed = face.eyes_closed
-                seen.sharpness = _region_sharpness(gray, face.box)
+                seen.sharpness = region(face.box)
             if self._embedder is not None and seen.is_main:
                 seen.embedding = self._embedder.embed(bgr, seen.detector_row)
             observations.append(seen)
@@ -347,19 +365,20 @@ class SmartCull:
         ~100 on the downscaled preview; tack-sharp frames score in the
         hundreds to thousands. Returns 0.0 if the image cannot be read.
         """
-        preview = fast_preview.load_preview(image_path, max_side=None, exact=True)
+        preview = fast_preview.load_preview(image_path, max_side=None, exact=True, mode="L")
         if preview is None:
             return 0.0
         return self._sharpness_of(preview.image)
 
-    def _sharpness_of(self, rgb: np.ndarray) -> float:
-        """Laplacian variance of an RGB array, at a fixed analysis size.
+    def _sharpness_of(self, image: np.ndarray) -> float:
+        """Laplacian variance at a fixed analysis size.
 
-        The array should be a full decode: the single area-averaged shrink
-        here is what keeps scores comparable between frames.
+        Takes a greyscale array (or RGB, which is converted). It should be
+        a full decode: the single area-averaged shrink here is what keeps
+        scores comparable between frames.
         """
-        # Grey first, then shrink: one channel to resample instead of three.
-        gray = fast_preview.fit(cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY), self.analysis_max_px)
+        gray = image if image.ndim == 2 else cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+        gray = fast_preview.fit(gray, self.analysis_max_px)
         return float(cv2.Laplacian(gray, cv2.CV_64F).var())
 
     @staticmethod
@@ -401,25 +420,24 @@ class SmartCull:
             logger.info("Face model unavailable -- skipping eye checks.")
             eyes = None
 
-        def measure(key: str, preview) -> CullResult:
+        def measure(key: str, pair) -> CullResult:
             path = Path(key)
-            if preview is None:
+            if pair is None:
                 return CullResult(path=path, sharpness=0.0, timestamp=self._file_time(path))
-            small = preview.fitted(FACE_MAX_SIDE)
             result = CullResult(
                 path=path,
-                sharpness=self._sharpness_of(preview.image),
-                timestamp=preview.captured_at or self._file_time(path),
-                phash=self._dhash_of(small),
+                sharpness=self._sharpness_of(pair.gray),
+                timestamp=pair.captured_at or self._file_time(path),
+                phash=self._dhash_of(pair.colour),
             )
             if eyes is not None:
-                # The full preview, not the small copy: faces are found
-                # small but their eyes are judged at full resolution.
-                eyes.annotate(result, preview.image)
+                eyes.annotate(result, pair.colour, pair.gray, pair.scale)
             return result
 
-        scored = fast_preview.map_previews(
-            paths, measure, max_side=None, exact=True, workers=workers, progress=progress
+        # Greyscale in full for sharpness, reduced colour for faces: see
+        # fast_preview for why one colour decode at full size is slower.
+        scored = fast_preview.map_pairs(
+            paths, measure, colour_max_side=FACE_MAX_SIDE, workers=workers, progress=progress
         )
         frames = [scored[str(p)] for p in paths]
         assign_scores(frames)

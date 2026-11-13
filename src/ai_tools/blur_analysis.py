@@ -188,7 +188,7 @@ def analyze(
         # JPEG, not a demosaic.
         from src.engine import fast_preview
 
-        preview = fast_preview.load_preview(path, max_side=None, exact=True)
+        preview = fast_preview.load_preview(path, max_side=None, exact=True, mode="L")
         if preview is None:
             return BlurReport(
                 sharpness=0.0,
@@ -200,7 +200,7 @@ def analyze(
                 strictness=strictness,
                 error=f"Could not read {path.name}",
             )
-        array = cv2.cvtColor(preview.image, cv2.COLOR_RGB2BGR)
+        array = preview.image   # greyscale; every measure below works on luminance
     else:
         array = image
 

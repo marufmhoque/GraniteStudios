@@ -178,10 +178,14 @@ def test_face_boxes_refer_to_the_recorded_frame_size(portraits):
     x, y, w, h = frame.faces[0].box
     assert 0 <= x and x + w <= width and 0 <= y and y + h <= height
 
-    # The face was found on an 800 px copy. Its box must come back in the
-    # full frame's pixels, matching a detection run at full size.
+    # The face was found on an 800 px copy and is reported in the pixels of
+    # the analysis image, whose size is frame_size. As a fraction of the
+    # frame it must match a detection run on the original file.
     from src.ai_tools.face_analysis import FaceAnalyzer
 
     assert max(width, height) > culling.DETECT_MAX_SIDE, "the test image is too small to prove anything"
-    full = FaceAnalyzer(download=False).detect(cv2.imread(str(portraits / "sharp.jpg")), measure_eyes=False)[0]
-    assert w == pytest.approx(full.w, rel=0.15) and x == pytest.approx(full.x, abs=0.15 * full.w)
+    original = cv2.imread(str(portraits / "sharp.jpg"))
+    full = FaceAnalyzer(download=False).detect(original, measure_eyes=False)[0]
+    full_width = original.shape[1]
+    assert w / width == pytest.approx(full.w / full_width, rel=0.15)
+    assert x / width == pytest.approx(full.x / full_width, abs=0.03)

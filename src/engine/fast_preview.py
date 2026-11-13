@@ -32,6 +32,20 @@ photographs as soft.
 * ``exact=True`` -- full decode, one area-averaged shrink. For anything
   compared against an absolute threshold: blur triage and sharpness scoring.
 
+Greyscale, and why a cull asks for two images
+----------------------------------------------
+
+Sharpness is measured on luminance. Decoding a JPEG straight to greyscale
+skips the chroma work, gives the same Laplacian score as decoding colour and
+converting (ratio 1.0007 on a 30 MP preview), takes half as long and holds a
+third of the memory. That last part matters more than it sounds: with seven
+workers each holding a 90 MB colour frame, the *whole* pipeline ran at 169 ms
+a frame against 35 ms for decoding alone, because shuffling that much memory
+does not get faster with more cores.
+
+So :func:`load_pair` returns two images from one embedded preview: greyscale
+at full size for sharpness, and reduced colour for everything else.
+
 Order of attempts for a RAW file:
 
 1. LibRaw's embedded-thumbnail extractor.
@@ -92,9 +106,9 @@ _FLIP_TO_TRANSPOSE = {
 
 @dataclass
 class Preview:
-    """An RGB preview and a record of how it was obtained."""
+    """A preview and a record of how it was obtained."""
 
-    image: np.ndarray                 # H x W x 3, uint8, RGB, upright
+    image: np.ndarray                 # uint8, upright; H x W x 3 RGB, or H x W grey
     source: str
     native_size: tuple[int, int]      # (w, h) of the preview before scaling
     extract_ms: float = 0.0
@@ -116,6 +130,28 @@ class Preview:
     def fitted(self, max_side: int) -> np.ndarray:
         """The image shrunk to ``max_side`` with a single area average."""
         return fit(self.image, max_side)
+
+
+@dataclass
+class AnalysisPair:
+    """Two renderings of one frame, for a cull.
+
+    ``gray`` is a full, exact greyscale decode: measure sharpness on it.
+    ``colour`` is a reduced RGB decode: find and measure faces on it.
+    ``scale`` converts a coordinate in ``colour`` to one in ``gray``.
+    """
+
+    gray: np.ndarray
+    colour: np.ndarray
+    source: str
+    native_size: tuple[int, int]
+    captured_at: datetime | None = None
+    extract_ms: float = 0.0
+    decode_ms: float = 0.0
+
+    @property
+    def scale(self) -> float:
+        return self.gray.shape[1] / float(self.colour.shape[1])
 
 
 # --------------------------------------------------------------------- #
@@ -171,9 +207,9 @@ def read_capture_time(image: Image.Image) -> datetime | None:
 
 
 def _open_upright(
-    source, max_side: int | None, exact: bool
+    source, max_side: int | None, exact: bool, mode: str = "RGB"
 ) -> tuple[Image.Image, tuple[int, int], datetime | None, bool]:
-    """Open an image upright in RGB.
+    """Open an image upright in ``mode`` ("RGB" or "L").
 
     Returns ``(image, native_size, captured_at, had_orientation_tag)``.
     """
@@ -184,11 +220,14 @@ def _open_upright(
         tagged = image.getexif().get(_EXIF_ORIENTATION, 1) not in (None, 0, 1)
     except Exception:
         tagged = False
-    if not exact and max_side and image.format == "JPEG" and max(native) > max_side:
-        image.draft("RGB", _draft_size(native, max_side))
+    if image.format == "JPEG":
+        reduce = not exact and max_side and max(native) > max_side
+        if reduce or mode == "L":
+            # Also how greyscale is requested: the decoder then skips chroma.
+            image.draft(mode, _draft_size(native, max_side) if reduce else native)
     image = ImageOps.exif_transpose(image)
-    if image.mode != "RGB":
-        image = image.convert("RGB")
+    if image.mode != mode:
+        image = image.convert(mode)
     turned = (image.size[0] >= image.size[1]) != (native[0] >= native[1])
     return image, (native[::-1] if turned else native), captured, tagged
 
@@ -284,83 +323,36 @@ def scan_for_jpeg(path: str | Path, min_side: int = 0) -> bytes | None:
 
 
 # --------------------------------------------------------------------- #
-# RAW
+# Locating a frame's pixels
 # --------------------------------------------------------------------- #
+
+@dataclass
+class _Source:
+    """Where a frame's preview pixels are, before any decoding.
+
+    Exactly one of ``jpeg`` (a stream still to decode) and ``array`` (RGB
+    pixels already in hand, upright) is set.
+    """
+
+    kind: str
+    jpeg: bytes | Path | None = None
+    array: np.ndarray | None = None
+    flip: int = 0
+    raw_landscape: bool = True
+    extract_ms: float = 0.0
+    captured: datetime | None = None
+
 
 def _elapsed(since: float) -> float:
     return (time.perf_counter() - since) * 1e3
 
 
-def _scanned_preview(
-    path: Path, max_side: int | None, min_side: int, exact: bool, started: float,
-    captured: datetime | None = None,
-) -> Preview | None:
-    data = scan_for_jpeg(path, min_side=min_side)
-    extract_ms = _elapsed(started)
-    if data is None:
-        return None
-    decoding = time.perf_counter()
+def _jpeg_native_size(data) -> tuple[int, int] | None:
     try:
-        image, native, found, _ = _open_upright(data, max_side, exact)
+        with Image.open(io.BytesIO(data) if isinstance(data, (bytes, bytearray)) else data) as probe:
+            return probe.size
     except Exception:
         return None
-    array = fit(np.asarray(image), max_side)
-    return Preview(array, SCANNED_JPEG, native, extract_ms, _elapsed(decoding), found or captured)
-
-
-def _raw_preview(path: Path, max_side: int | None, min_side: int, exact: bool) -> Preview | None:
-    started = time.perf_counter()
-    try:
-        raw = rawpy.imread(str(path))
-    except Exception as exc:
-        logger.debug("LibRaw could not open %s (%s); scanning for a JPEG.", path.name, exc)
-        return _scanned_preview(path, max_side, min_side, exact, started)
-
-    with raw:
-        flip = int(getattr(raw.sizes, "flip", 0) or 0)
-        raw_landscape = raw.sizes.raw_width >= raw.sizes.raw_height
-        thumb = None
-        try:
-            thumb = raw.extract_thumb()
-        except (rawpy.LibRawNoThumbnailError, rawpy.LibRawUnsupportedThumbnailError):
-            thumb = None
-        except Exception as exc:  # a corrupt thumbnail must not sink the frame
-            logger.debug("Thumbnail extraction failed for %s: %s", path.name, exc)
-        extract_ms = _elapsed(started)
-        decoding = time.perf_counter()
-        captured = None
-
-        if thumb is not None and thumb.format == rawpy.ThumbFormat.JPEG:
-            try:
-                image, native, captured, tagged = _open_upright(thumb.data, max_side, exact)
-                if max(native) >= min_side:
-                    if not tagged:
-                        image = _apply_raw_flip(image, flip, raw_landscape)
-                    array = fit(np.asarray(image), max_side)
-                    return Preview(array, EMBEDDED_JPEG, native, extract_ms, _elapsed(decoding), captured)
-            except Exception as exc:
-                logger.debug("Embedded JPEG in %s did not decode: %s", path.name, exc)
-
-        if thumb is not None and thumb.format == rawpy.ThumbFormat.BITMAP:
-            bitmap = np.asarray(thumb.data)
-            native = (bitmap.shape[1], bitmap.shape[0])
-            if max(native) >= min_side:
-                image = _apply_raw_flip(Image.fromarray(bitmap), flip, raw_landscape)
-                array = fit(np.asarray(image), max_side)
-                return Preview(array, EMBEDDED_BITMAP, native, extract_ms, _elapsed(decoding))
-
-        # No usable preview: develop the sensor data at half size. LibRaw
-        # applies the orientation itself on this path.
-        try:
-            rgb = raw.postprocess(half_size=True, use_camera_wb=True, output_bps=8)
-        except Exception as exc:
-            logger.debug("Half-size demosaic failed for %s: %s", path.name, exc)
-            return _scanned_preview(path, max_side, 0, exact, started, captured)
-        # A preview too small to cull on still knows when it was taken.
-        return Preview(
-            fit(rgb, max_side), DEMOSAIC_HALF, (rgb.shape[1], rgb.shape[0]),
-            extract_ms, _elapsed(decoding), captured,
-        )
 
 
 def _container_capture_time(path: Path) -> datetime | None:
@@ -377,11 +369,82 @@ def _container_capture_time(path: Path) -> datetime | None:
         return None
 
 
-def _plain_preview(path: Path, max_side: int | None, exact: bool) -> Preview | None:
+def _locate_scanned(path: Path, min_side: int, started: float) -> _Source | None:
+    data = scan_for_jpeg(path, min_side=min_side)
+    if data is None:
+        return None
+    return _Source(SCANNED_JPEG, jpeg=data, extract_ms=_elapsed(started))
+
+
+def _locate_raw(path: Path, min_side: int) -> _Source | None:
     started = time.perf_counter()
-    image, native, captured, _ = _open_upright(path, max_side, exact)
-    array = fit(np.asarray(image), max_side)
-    return Preview(array, DECODED, native, 0.0, _elapsed(started), captured)
+    try:
+        raw = rawpy.imread(str(path))
+    except Exception as exc:
+        logger.debug("LibRaw could not open %s (%s); scanning for a JPEG.", path.name, exc)
+        return _locate_scanned(path, min_side, started)
+
+    with raw:
+        flip = int(getattr(raw.sizes, "flip", 0) or 0)
+        raw_landscape = raw.sizes.raw_width >= raw.sizes.raw_height
+        thumb = None
+        try:
+            thumb = raw.extract_thumb()
+        except (rawpy.LibRawNoThumbnailError, rawpy.LibRawUnsupportedThumbnailError):
+            thumb = None
+        except Exception as exc:  # a corrupt thumbnail must not sink the frame
+            logger.debug("Thumbnail extraction failed for %s: %s", path.name, exc)
+        extract_ms = _elapsed(started)
+
+        if thumb is not None and thumb.format == rawpy.ThumbFormat.JPEG:
+            data = bytes(thumb.data)
+            native = _jpeg_native_size(data)
+            if native is not None and max(native) >= min_side:
+                return _Source(EMBEDDED_JPEG, jpeg=data, flip=flip,
+                               raw_landscape=raw_landscape, extract_ms=extract_ms)
+
+        if thumb is not None and thumb.format == rawpy.ThumbFormat.BITMAP:
+            bitmap = np.asarray(thumb.data)
+            if max(bitmap.shape[:2]) >= min_side:
+                upright = _apply_raw_flip(Image.fromarray(bitmap), flip, raw_landscape)
+                return _Source(EMBEDDED_BITMAP, array=np.asarray(upright), extract_ms=extract_ms)
+
+        # No usable preview: develop the sensor data at half size. LibRaw
+        # applies the orientation itself on this path.
+        try:
+            rgb = raw.postprocess(half_size=True, use_camera_wb=True, output_bps=8)
+        except Exception as exc:
+            logger.debug("Half-size demosaic failed for %s: %s", path.name, exc)
+            return _locate_scanned(path, 0, started)
+        return _Source(DEMOSAIC_HALF, array=rgb, extract_ms=_elapsed(started))
+
+
+def _locate(path: Path, min_side: int) -> _Source | None:
+    if path.suffix.lower() in RAW_EXTENSIONS:
+        source = _locate_raw(path, min_side)
+        if source is not None and source.captured is None and source.kind != EMBEDDED_JPEG:
+            source.captured = _container_capture_time(path)
+        return source
+    if not path.is_file():
+        return None
+    return _Source(DECODED, jpeg=path)   # "jpeg" here just means "a file Pillow can open"
+
+
+def _decode(
+    source: _Source, max_side: int | None, exact: bool, mode: str
+) -> tuple[np.ndarray, tuple[int, int], datetime | None]:
+    """Pixels from a located source: ``(array, native_size, captured_at)``."""
+    if source.array is not None:
+        array = source.array
+        native = (array.shape[1], array.shape[0])
+        if mode == "L" and array.ndim == 3:
+            array = cv2.cvtColor(array, cv2.COLOR_RGB2GRAY)
+        return fit(array, max_side), native, source.captured
+
+    image, native, captured, tagged = _open_upright(source.jpeg, max_side, exact, mode)
+    if source.kind == EMBEDDED_JPEG and not tagged:
+        image = _apply_raw_flip(image, source.flip, source.raw_landscape)
+    return fit(np.asarray(image), max_side), native, captured or source.captured
 
 
 # --------------------------------------------------------------------- #
@@ -393,26 +456,57 @@ def load_preview(
     max_side: int | None = DEFAULT_MAX_SIDE,
     min_side: int = DEFAULT_MIN_SIDE,
     exact: bool = False,
+    mode: str = "RGB",
 ) -> Preview | None:
-    """Return an upright RGB preview no larger than ``max_side``.
+    """Return an upright preview no larger than ``max_side``.
 
     ``max_side=None`` keeps the preview at its native size. ``min_side`` is
     the smallest embedded preview worth accepting; anything smaller is
     passed over for a half-size demosaic. Pass 0 when any preview will do,
     as for a grid thumbnail. ``exact`` selects the measurement-grade decode
-    described in the module docstring.
+    and ``mode="L"`` a greyscale one; both are described in the module
+    docstring.
 
     Returns None when the file cannot be read at all. It never raises.
     """
     path = Path(path)
     try:
-        if path.suffix.lower() in RAW_EXTENSIONS:
-            floor = min(min_side, max_side) if max_side else min_side
-            preview = _raw_preview(path, max_side, floor, exact)
-            if preview is not None and preview.captured_at is None:
-                preview.captured_at = _container_capture_time(path)
-            return preview
-        return _plain_preview(path, max_side, exact)
+        floor = min(min_side, max_side) if max_side else min_side
+        source = _locate(path, floor)
+        if source is None:
+            return None
+        decoding = time.perf_counter()
+        array, native, captured = _decode(source, max_side, exact, mode)
+        if captured is None and source.kind == EMBEDDED_JPEG:
+            captured = _container_capture_time(path)
+        return Preview(array, source.kind, native, source.extract_ms, _elapsed(decoding), captured)
+    except Exception as exc:
+        logger.debug("No preview for %s: %s", path.name, exc)
+        return None
+
+
+def load_pair(
+    path: str | Path,
+    colour_max_side: int = DEFAULT_MAX_SIDE,
+    min_side: int = DEFAULT_MIN_SIDE,
+) -> AnalysisPair | None:
+    """Greyscale at full size and reduced colour, from one located preview.
+
+    The file is opened and its preview found once; the two decodes then run
+    on the same bytes. Returns None when the file cannot be read.
+    """
+    path = Path(path)
+    try:
+        source = _locate(path, min_side)
+        if source is None:
+            return None
+        decoding = time.perf_counter()
+        gray, native, captured = _decode(source, None, True, "L")
+        colour, _, _ = _decode(source, colour_max_side, False, "RGB")
+        if captured is None and source.kind == EMBEDDED_JPEG:
+            captured = _container_capture_time(path)
+        return AnalysisPair(gray, colour, source.kind, native, captured,
+                            source.extract_ms, _elapsed(decoding))
     except Exception as exc:
         logger.debug("No preview for %s: %s", path.name, exc)
         return None
@@ -422,8 +516,8 @@ def default_workers() -> int:
     """Threads for a batch.
 
     Decoding releases the GIL, so threads do scale. One core is left for
-    the interface, and the count is capped by free memory because an exact
-    decode of a 30 MP preview holds about 90 MB while it is being measured.
+    the interface, and the count is capped by free memory because a full
+    decode of a 30 MP preview holds tens of megabytes while it is measured.
     """
     workers = max(1, min(8, (os.cpu_count() or 2) - 1))
     try:
@@ -436,6 +530,17 @@ def default_workers() -> int:
     return workers
 
 
+def _map(ordered: list[str], work, workers, progress) -> dict[str, object]:
+    total = len(ordered)
+    results: dict[str, object] = {}
+    with ThreadPoolExecutor(max_workers=workers or default_workers()) as pool:
+        for done, (key, value) in enumerate(zip(ordered, pool.map(work, ordered)), start=1):
+            results[key] = value
+            if progress:
+                progress(done, total)
+    return results
+
+
 def map_previews(
     paths: Iterable[str | Path],
     fn: Callable[[str, Preview | None], object],
@@ -444,6 +549,7 @@ def map_previews(
     exact: bool = False,
     workers: int | None = None,
     progress: Callable[[int, int], None] | None = None,
+    mode: str = "RGB",
 ) -> dict[str, object]:
     """Decode each file and run ``fn(path, preview)`` inside the same worker.
 
@@ -452,19 +558,27 @@ def map_previews(
     thousand-frame cull run in bounded memory. ``fn`` runs on a worker
     thread and must not touch the interface.
     """
-    ordered = [str(p) for p in paths]
-    total = len(ordered)
-    results: dict[str, object] = {}
+    return _map(
+        [str(p) for p in paths],
+        lambda key: fn(key, load_preview(key, max_side, min_side, exact, mode)),
+        workers, progress,
+    )
 
-    def work(key: str):
-        return fn(key, load_preview(key, max_side, min_side, exact))
 
-    with ThreadPoolExecutor(max_workers=workers or default_workers()) as pool:
-        for done, (key, value) in enumerate(zip(ordered, pool.map(work, ordered)), start=1):
-            results[key] = value
-            if progress:
-                progress(done, total)
-    return results
+def map_pairs(
+    paths: Iterable[str | Path],
+    fn: Callable[[str, AnalysisPair | None], object],
+    colour_max_side: int = DEFAULT_MAX_SIDE,
+    min_side: int = DEFAULT_MIN_SIDE,
+    workers: int | None = None,
+    progress: Callable[[int, int], None] | None = None,
+) -> dict[str, object]:
+    """As :func:`map_previews`, handing ``fn`` an :class:`AnalysisPair`."""
+    return _map(
+        [str(p) for p in paths],
+        lambda key: fn(key, load_pair(key, colour_max_side, min_side)),
+        workers, progress,
+    )
 
 
 def load_previews(
