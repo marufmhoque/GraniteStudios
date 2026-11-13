@@ -4,8 +4,8 @@
 | --- | --- |
 | **Version** | 2.0 |
 | **Date** | 13 November 2026 |
-| **Status** | Living document — tracks the `v2` branch until it merges to `main` |
-| **Applies to** | commit `db1e4cf` and later |
+| **Status** | Living document — tracks `main` |
+| **Applies to** | version 2.0 (`v2` merged to `main`) and later |
 | **Previous version** | [1.0](https://github.com/marufmhoque/GraniteStudios/blob/12aa977/PRD.md), commit `12aa977` |
 | **Owner** | Maruf Hoque |
 | **Repository** | https://github.com/marufmhoque/GraniteStudios |
@@ -913,8 +913,10 @@ models, creates shortcuts, registers for uninstall and starts the app
 headlessly to confirm it works. Re-running it updates. The PyInstaller build
 collects the lens database and the 2.0 hidden imports.
 
-**2.0 is on the `v2` branch.** The installer republishes from `main`, so
-merging `v2` is what releases it.
+**2.0 is released from `main`.** The installer republishes on every push to
+`main`, so re-running `Install-GraniteStudios.bat` updates an existing install
+to 2.0. It replaces the old ONNX Runtime with the DirectML build and
+pre-fetches the face mesh.
 
 ### 10.2 macOS
 

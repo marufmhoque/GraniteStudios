@@ -8,6 +8,8 @@ and installs it for you. Re-run the same file any time to update.
 
 > **📋 [Product Requirements Document (PRD.md)](PRD.md)** — who it is for, the invariants it must never break (originals are never modified or deleted), every requirement with its measured evidence, known limitations, and the roadmap.
 
+> **New in 2.0:** six workspaces (Cull, Develop, Retouch, Design, Export, Video), a non-destructive develop engine, layers and AI masks, vector watermarks, face-mesh blink and smile detection, grouping by person, and a 42–104 second cull of 1,000 RAW files. Edits are now saved as small settings files rather than new images. Re-run the installer to update; your photos and `-edit` folders are left alone.
+
 ---
 
 **Local-first AI photo and video editing suite** for photographers and content creators. Designed to run smoothly on modest hardware (i5-8350U + 32GB RAM), but scales to powerful machines with CUDA or Apple Silicon.
