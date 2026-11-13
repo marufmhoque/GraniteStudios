@@ -1,14 +1,38 @@
-"""AI culling suite: sharpness scoring and burst grouping.
+"""AI culling suite: sharpness, faces, burst grouping and a keeper score.
 
-Designed for high-volume shoots: score every frame's sharpness with
-Laplacian variance, group burst sequences by capture timestamp, and pick
-the technical best of each burst automatically.
+Designed for high-volume shoots. Every frame is decoded once; from that one
+preview come its sharpness, a perceptual hash, its capture time and, when
+face checking is on, a measurement of every face in it. Frames are grouped
+into bursts by capture time and ranked within each burst.
+
+The keeper score
+----------------
+    score = 0.40 * face sharpness + 0.35 * eyes + 0.15 * smile + 0.10 * composition
+
+Each term is first brought to 0..1, because the raw quantities are not
+comparable: Laplacian variance runs into the thousands and an eye aspect
+ratio tops out near 0.3. Weighting them as they come would make the score a
+restatement of sharpness.
+
+* *Face sharpness* -- Laplacian variance inside the main faces, relative to
+  the sharpest faces in the batch. Background detail does not count, so a
+  frame focused on the wall behind someone no longer wins.
+* *Eyes* -- eye openness of the least open main face, from the eye aspect
+  ratio. One person blinking spoils a group shot.
+* *Smile* -- mean smile of the main faces.
+* *Composition* -- a stated heuristic, not a measurement of taste: is the
+  main face clear of the frame edges and does it have room above it.
+
+A frame with no faces has nothing to say about eyes or smiles. Its score is
+its whole-frame sharpness, placed on the same 0..1 scale, so frames with
+and without people can still be ranked against each other.
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -19,9 +43,27 @@ import numpy as np
 from PIL import Image
 from PIL.ExifTags import TAGS
 
+from src.engine import fast_preview
 from src.engine.universal_loader import UniversalLoader, RAW_EXTENSIONS
 
 logger = logging.getLogger(__name__)
+
+# One decode feeds every measurement. Sharpness is taken from the full
+# preview (see fast_preview's note on why a reduced decode cannot be used
+# for it). Faces are *found* on a small copy and *measured* on the full one.
+FACE_MAX_SIDE = 1600      # perceptual hash, and the standalone eye check
+DETECT_MAX_SIDE = 800     # face search
+
+# Keeper-score weights (see the module docstring).
+WEIGHT_SHARPNESS = 0.40
+WEIGHT_EYES = 0.35
+WEIGHT_SMILE = 0.15
+WEIGHT_COMPOSITION = 0.10
+
+# A face smaller than this fraction of the largest face in the frame is
+# treated as a bystander and does not vote on eyes or smiles.
+MAIN_FACE_RATIO = 0.5
+FACE_SHARPNESS_SIDE = 256   # faces are measured at a common size
 
 # EXIF tag ids we care about (avoid rebuilding the name map per file).
 _EXIF_DATETIME_TAGS = {
@@ -46,6 +88,232 @@ class CullResult:
     eyes_closed: bool = False
     min_eye_openness: float | None = None
     eyes_checked: bool = False
+    # Added in 2.0.
+    faces: list = field(default_factory=list)      # FaceObservation, one per face
+    frame_size: tuple[int, int] | None = None      # pixels the face boxes refer to
+    eye_method: str = "none"                       # "mesh", "heuristic" or "none"
+    min_ear: float | None = None
+    smile: float | None = None
+    mouth_open: bool = False
+    face_sharpness: float | None = None
+    composition: float | None = None
+    score: float = 0.0
+    person_ids: list = field(default_factory=list)
+
+
+@dataclass
+class FaceObservation:
+    """What was measured on one face in one frame."""
+
+    box: tuple[int, int, int, int]
+    confidence: float
+    is_main: bool = True
+    sharpness: float = 0.0
+    ear: float | None = None
+    eye_openness: float | None = None
+    eyes_closed: bool = False
+    smile: float | None = None
+    mouth_open: bool = False
+    roll_deg: float | None = None
+    detector_row: np.ndarray | None = None     # for face recognition alignment
+    embedding: np.ndarray | None = None
+    person_id: int | None = None
+
+
+def _region_sharpness(gray: np.ndarray, box: tuple[int, int, int, int]) -> float:
+    """Laplacian variance inside a box, measured at a common size.
+
+    Shrinking large faces to one size keeps a close-up from scoring higher
+    than a mid-shot merely for having more pixels. Small faces are left as
+    they are: enlarging them would only add blur.
+    """
+    x, y, w, h = box
+    height, width = gray.shape[:2]
+    x0, y0 = max(0, x), max(0, y)
+    x1, y1 = min(width, x + w), min(height, y + h)
+    if x1 - x0 < 8 or y1 - y0 < 8:
+        return 0.0
+    crop = fast_preview.fit(gray[y0:y1, x0:x1], FACE_SHARPNESS_SIDE)
+    return float(cv2.Laplacian(crop, cv2.CV_64F).var())
+
+
+def composition_score(box: tuple[int, int, int, int], frame_size: tuple[int, int]) -> float:
+    """A 0..1 heuristic for how the main face sits in the frame.
+
+    This is not a judgement of composition as a photographer means it. It
+    checks two things that are almost always faults: a face cut by the edge
+    of the frame, and a face jammed against the top with no room above it.
+    Anything else scores full marks.
+    """
+    x, y, w, h = box
+    width, height = frame_size
+    if width <= 0 or height <= 0 or w <= 0 or h <= 0:
+        return 1.0
+    score = 1.0
+    # Cut by an edge: how much of the box falls outside the frame.
+    inside_w = max(0, min(width, x + w) - max(0, x))
+    inside_h = max(0, min(height, y + h) - max(0, y))
+    visible = (inside_w * inside_h) / float(w * h)
+    score -= 0.6 * (1.0 - visible)
+    # Touching an edge without being cut still crowds the subject.
+    margin = min(x, y, width - (x + w), height - (y + h)) / float(max(w, h))
+    if margin < 0.05:
+        score -= 0.2
+    # Headroom: the detector box starts near the brow, so the head needs
+    # roughly a third of the box above it.
+    if y < 0.3 * h:
+        score -= 0.2 * (1.0 - max(0.0, y) / (0.3 * h))
+    return float(np.clip(score, 0.0, 1.0))
+
+
+class _FaceJudge:
+    """Finds and measures faces from several threads.
+
+    OpenCV networks hold per-call state, so each worker thread gets its own
+    detector and mesh. A caller-supplied analyzer is a single object and is
+    therefore used under a lock instead.
+
+    With the face mesh available, eyes are judged by eye aspect ratio. When
+    it is not, the older patch-darkness heuristic is used and the result
+    says so in ``eye_method``.
+    """
+
+    def __init__(self, analyzer=None, use_mesh: bool = True, embedder=None):
+        self._shared = analyzer
+        self._lock = threading.Lock()
+        self._local = threading.local()
+        self._embedder = embedder
+        if analyzer is None:
+            from src.ai_tools.face_analysis import FaceAnalyzer
+
+            # Created here, on the calling thread, so a first-run model
+            # download happens once rather than racing across workers.
+            self._factory = FaceAnalyzer
+            self.available = FaceAnalyzer().available
+        else:
+            self._factory = None
+            self.available = bool(getattr(analyzer, "available", True))
+
+        self._mesh = None
+        if use_mesh and self.available and analyzer is None:
+            try:
+                from src.ai_tools.face_mesh import ThreadLocalFaceMesh
+
+                mesh = ThreadLocalFaceMesh()
+                self._mesh = mesh if mesh.available else None
+            except Exception as exc:  # the cull still works without it
+                logger.info("Face mesh unavailable (%s); using the eye heuristic.", exc)
+
+    @property
+    def method(self) -> str:
+        return "mesh" if self._mesh is not None else "heuristic"
+
+    def _detector(self):
+        analyzer = getattr(self._local, "analyzer", None)
+        if analyzer is None:
+            analyzer = self._local.analyzer = self._factory(download=False)
+        return analyzer
+
+    def annotate(self, frame: "CullResult", rgb: np.ndarray) -> None:
+        """Measure every face in ``rgb`` and record it on ``frame``."""
+        bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+        height, width = bgr.shape[:2]
+        frame.eyes_checked = True
+        frame.frame_size = (width, height)
+
+        if self._shared is not None:
+            with self._lock:
+                report = self._shared.analyze(bgr)
+            faces, detector = report.faces, None
+        else:
+            detector = self._detector()
+            faces = detector.detect_reduced(bgr, DETECT_MAX_SIDE)
+
+        frame.face_count = len(faces)
+        if not faces:
+            return
+
+        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+        largest = max(max(f.w, f.h) for f in faces)
+        observations: list[FaceObservation] = []
+        for face in faces:
+            seen = FaceObservation(
+                box=face.box,
+                confidence=face.confidence,
+                is_main=max(face.w, face.h) >= MAIN_FACE_RATIO * largest,
+                detector_row=face.detector_row() if hasattr(face, "detector_row") else None,
+            )
+            measured = self._mesh.analyze_face(bgr, face) if self._mesh is not None else None
+            if measured is not None:
+                seen.ear = measured.ear
+                seen.eye_openness = measured.eye_openness
+                seen.eyes_closed = measured.eyes_closed
+                seen.smile = measured.smile
+                seen.mouth_open = measured.mouth_is_open
+                seen.roll_deg = measured.roll_deg
+                seen.sharpness = _region_sharpness(gray, measured.eye_box())
+            else:
+                if detector is not None:
+                    detector.measure_eyes(gray, face)
+                if face.eyes_measured:
+                    seen.eye_openness = face.min_openness
+                    seen.eyes_closed = face.eyes_closed
+                seen.sharpness = _region_sharpness(gray, face.box)
+            if self._embedder is not None and seen.is_main:
+                seen.embedding = self._embedder.embed(bgr, seen.detector_row)
+            observations.append(seen)
+
+        frame.faces = observations
+        frame.eye_method = "mesh" if any(o.ear is not None for o in observations) else (
+            "heuristic" if any(o.eye_openness is not None for o in observations) else "none"
+        )
+        main = [o for o in observations if o.is_main]
+        frame.eyes_closed = any(o.eyes_closed for o in main)
+        openness = [o.eye_openness for o in main if o.eye_openness is not None]
+        frame.min_eye_openness = min(openness) if openness else None
+        ears = [o.ear for o in main if o.ear is not None]
+        frame.min_ear = min(ears) if ears else None
+        smiles = [o.smile for o in main if o.smile is not None]
+        frame.smile = float(np.mean(smiles)) if smiles else None
+        frame.mouth_open = any(o.mouth_open for o in main)
+        frame.face_sharpness = float(np.mean([o.sharpness for o in main])) if main else None
+        biggest = max(main, key=lambda o: o.box[2] * o.box[3])
+        frame.composition = composition_score(biggest.box, (width, height))
+
+
+def assign_scores(frames: "list[CullResult]") -> None:
+    """Fill in ``score`` for a batch. See the module docstring for the terms.
+
+    Sharpness is scaled against the batch itself (its 95th percentile), so
+    the score ranks frames from one shoot against each other. It is not an
+    absolute quality figure and should not be compared across shoots.
+    """
+    if not frames:
+        return
+
+    def scale(values: list[float]) -> float:
+        positive = [v for v in values if v and v > 0]
+        return float(np.percentile(positive, 95)) if positive else 1.0
+
+    frame_top = scale([f.sharpness for f in frames])
+    face_top = scale([f.face_sharpness for f in frames if f.face_sharpness is not None])
+
+    for frame in frames:
+        whole = float(np.clip(frame.sharpness / frame_top, 0.0, 1.0))
+        if frame.face_sharpness is None:
+            frame.score = whole
+            continue
+        terms = [(WEIGHT_SHARPNESS, float(np.clip(frame.face_sharpness / face_top, 0.0, 1.0)))]
+        if frame.min_eye_openness is not None:
+            terms.append((WEIGHT_EYES, float(np.clip(frame.min_eye_openness, 0.0, 1.0))))
+        if frame.smile is not None:
+            terms.append((WEIGHT_SMILE, float(np.clip(frame.smile, 0.0, 1.0))))
+        if frame.composition is not None:
+            terms.append((WEIGHT_COMPOSITION, frame.composition))
+        # A term that could not be measured is left out and the rest are
+        # rescaled, rather than scoring the gap as zero.
+        total = sum(weight for weight, _ in terms)
+        frame.score = sum(weight * value for weight, value in terms) / total if total else whole
 
 
 @dataclass
@@ -79,19 +347,90 @@ class SmartCull:
         ~100 on the downscaled preview; tack-sharp frames score in the
         hundreds to thousands. Returns 0.0 if the image cannot be read.
         """
-        preview = self.loader.load_preview(image_path)
+        preview = fast_preview.load_preview(image_path, max_side=None, exact=True)
         if preview is None:
             return 0.0
+        return self._sharpness_of(preview.image)
 
-        arr = np.asarray(preview)
-        # Bound analysis size so scoring is fast and scores are comparable.
-        h, w = arr.shape[:2]
-        scale = self.analysis_max_px / max(h, w)
-        if scale < 1.0:
-            arr = cv2.resize(arr, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+    def _sharpness_of(self, rgb: np.ndarray) -> float:
+        """Laplacian variance of an RGB array, at a fixed analysis size.
 
-        gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
+        The array should be a full decode: the single area-averaged shrink
+        here is what keeps scores comparable between frames.
+        """
+        # Grey first, then shrink: one channel to resample instead of three.
+        gray = fast_preview.fit(cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY), self.analysis_max_px)
         return float(cv2.Laplacian(gray, cv2.CV_64F).var())
+
+    @staticmethod
+    def _dhash_of(rgb: np.ndarray) -> int:
+        gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+        pixels = cv2.resize(gray, (9, 8), interpolation=cv2.INTER_AREA).astype(np.int16)
+        value = 0
+        for bit in (pixels[:, 1:] > pixels[:, :-1]).flatten():
+            value = (value << 1) | int(bit)
+        return value
+
+    # ------------------------------------------------------------------ #
+    # One pass over a batch
+    # ------------------------------------------------------------------ #
+
+    def score_frames(
+        self,
+        image_paths,
+        check_eyes: bool = False,
+        analyzer=None,
+        progress: Callable[[int, int], None] | None = None,
+        workers: int | None = None,
+        use_mesh: bool = True,
+        embedder=None,
+    ) -> list[CullResult]:
+        """Score a batch, decoding each file exactly once.
+
+        Sharpness, the perceptual hash, the capture time and (optionally)
+        the face measurements all come from the same decoded preview, on a
+        pool of worker threads. Previously each of those opened the file
+        again, and the eye check fully developed every RAW.
+
+        ``embedder`` is an optional ``person_clustering.FaceEmbedder``; when
+        given, each main face also gets an identity embedding.
+        """
+        paths = [Path(p) for p in image_paths]
+        eyes = _FaceJudge(analyzer, use_mesh=use_mesh, embedder=embedder) if check_eyes else None
+        if eyes is not None and not eyes.available:
+            logger.info("Face model unavailable -- skipping eye checks.")
+            eyes = None
+
+        def measure(key: str, preview) -> CullResult:
+            path = Path(key)
+            if preview is None:
+                return CullResult(path=path, sharpness=0.0, timestamp=self._file_time(path))
+            small = preview.fitted(FACE_MAX_SIDE)
+            result = CullResult(
+                path=path,
+                sharpness=self._sharpness_of(preview.image),
+                timestamp=preview.captured_at or self._file_time(path),
+                phash=self._dhash_of(small),
+            )
+            if eyes is not None:
+                # The full preview, not the small copy: faces are found
+                # small but their eyes are judged at full resolution.
+                eyes.annotate(result, preview.image)
+            return result
+
+        scored = fast_preview.map_previews(
+            paths, measure, max_side=None, exact=True, workers=workers, progress=progress
+        )
+        frames = [scored[str(p)] for p in paths]
+        assign_scores(frames)
+        return frames
+
+    @staticmethod
+    def _file_time(path: Path) -> datetime | None:
+        try:
+            return datetime.fromtimestamp(os.path.getmtime(path))
+        except OSError:
+            return None
 
     # ------------------------------------------------------------------ #
     # Perceptual hashing (near-duplicate detection)
@@ -105,18 +444,10 @@ class SmartCull:
         burst of the same scene) produce hashes a small Hamming distance
         apart, even across minor exposure/focus changes. Returns 0 on failure.
         """
-        preview = self.loader.load_preview(image_path)
+        preview = fast_preview.load_preview(image_path, max_side=FACE_MAX_SIDE)
         if preview is None:
             return 0
-
-        small = preview.convert("L").resize((9, 8), Image.Resampling.LANCZOS)
-        pixels = np.asarray(small, dtype=np.int16)
-        diff = pixels[:, 1:] > pixels[:, :-1]  # 8x8 boolean grid
-
-        value = 0
-        for bit in diff.flatten():
-            value = (value << 1) | int(bit)
-        return value
+        return self._dhash_of(preview.image)
 
     @staticmethod
     def hamming_distance(a: int, b: int) -> int:
@@ -130,27 +461,23 @@ class SmartCull:
     def get_timestamp(self, image_path: str | Path) -> datetime | None:
         """Read the capture timestamp from EXIF, falling back to file mtime."""
         path = Path(image_path)
-
-        if path.suffix.lower() not in RAW_EXTENSIONS:
-            try:
-                with Image.open(path) as img:
-                    exif = img.getexif()
-                    for tag_id in _EXIF_DATETIME_TAGS:
-                        raw_value = exif.get(tag_id)
-                        if raw_value:
-                            try:
-                                return datetime.strptime(str(raw_value), "%Y:%m:%d %H:%M:%S")
-                            except ValueError:
-                                continue
-            except Exception:
-                logger.debug("EXIF read failed for %s", path, exc_info=True)
-
-        # RAW files and EXIF-less images: file modification time is the
-        # closest stable proxy for capture time.
         try:
-            return datetime.fromtimestamp(os.path.getmtime(path))
-        except OSError:
-            return None
+            if path.suffix.lower() in RAW_EXTENSIONS:
+                # The embedded preview carries the camera's EXIF. Any size
+                # will do; only its header is wanted.
+                preview = fast_preview.load_preview(path, max_side=64, min_side=0)
+                if preview is not None and preview.captured_at:
+                    return preview.captured_at
+            else:
+                with Image.open(path) as img:
+                    captured = fast_preview.read_capture_time(img)
+                if captured:
+                    return captured
+        except Exception:
+            logger.debug("EXIF read failed for %s", path, exc_info=True)
+
+        # No EXIF time: file modification time is the closest stable proxy.
+        return self._file_time(path)
 
     # ------------------------------------------------------------------ #
     # Burst grouping
@@ -160,6 +487,8 @@ class SmartCull:
         self,
         image_paths: list[str | Path],
         time_threshold: float = 2.0,
+        check_eyes: bool = False,
+        progress: Callable[[int, int], None] | None = None,
     ) -> list[BurstGroup]:
         """Group photos into bursts by capture-time proximity.
 
@@ -168,16 +497,7 @@ class SmartCull:
         become their own group. Every group's sharpest frame is flagged as
         the burst pick.
         """
-        results: list[CullResult] = []
-        for p in image_paths:
-            path = Path(p)
-            results.append(
-                CullResult(
-                    path=path,
-                    sharpness=self.calculate_sharpness(path),
-                    timestamp=self.get_timestamp(path),
-                )
-            )
+        results = self.score_frames(image_paths, check_eyes=check_eyes, progress=progress)
 
         # Sort by timestamp; undated frames go last as singletons.
         dated = sorted((r for r in results if r.timestamp), key=lambda r: r.timestamp)
@@ -208,10 +528,14 @@ class SmartCull:
         self,
         folder: str | Path,
         time_threshold: float = 2.0,
+        check_eyes: bool = False,
+        progress: Callable[[int, int], None] | None = None,
     ) -> list[BurstGroup]:
         """Convenience: scan a folder and return its burst groups."""
         paths = self.loader.scan_folder(folder)
-        return self.group_bursts(list(paths), time_threshold=time_threshold)
+        return self.group_bursts(
+            list(paths), time_threshold=time_threshold, check_eyes=check_eyes, progress=progress
+        )
 
     def check_eyes(
         self,
@@ -226,26 +550,21 @@ class SmartCull:
         fetch it — the same graceful-degradation rule the rest of the app
         follows.
         """
-        if analyzer is None:
-            from src.ai_tools.face_analysis import FaceAnalyzer
-
-            analyzer = FaceAnalyzer()
-        if not analyzer.available:
+        eyes = _FaceJudge(analyzer)
+        if not eyes.available:
             logger.info("Face model unavailable — skipping eye checks.")
             return False
 
-        total = len(frames)
-        for i, frame in enumerate(frames, start=1):
-            report = analyzer.analyze_path(frame.path)
-            frame.eyes_checked = True
-            frame.face_count = report.face_count
-            frame.eyes_closed = report.any_eyes_closed
-            openness = [
-                f.min_openness for f in report.faces if f.min_openness is not None
-            ]
-            frame.min_eye_openness = min(openness) if openness else None
-            if progress:
-                progress(i, total)
+        by_path = {str(frame.path): frame for frame in frames}
+
+        def measure(key: str, preview) -> None:
+            if preview is not None:
+                eyes.annotate(by_path[key], preview.image)
+
+        fast_preview.map_previews(
+            by_path, measure, max_side=FACE_MAX_SIDE, progress=progress
+        )
+        assign_scores(frames)
         return True
 
     def cull_to_target(
@@ -276,12 +595,11 @@ class SmartCull:
         if target_count < 0:
             raise ValueError("target_count cannot be negative")
 
-        groups = self.cull_folder(folder, time_threshold=time_threshold)
-
-        if check_eyes:
-            # Annotate before ranking, so a blink can demote a frame that
-            # would otherwise win its burst on sharpness alone.
-            self.check_eyes([f for g in groups for f in g.frames], progress=progress)
+        # Eyes are measured in the same pass as sharpness, before ranking, so
+        # a blink can demote a frame that would otherwise win its burst.
+        groups = self.cull_folder(
+            folder, time_threshold=time_threshold, check_eyes=check_eyes, progress=progress
+        )
 
         # Sharpest-first inside every burst, so round-robin passes take each
         # burst's best remaining frame. With eye checking on, an open-eyed
@@ -291,7 +609,7 @@ class SmartCull:
         for group in groups:
             frames = sorted(
                 group.frames,
-                key=lambda f: (not f.eyes_closed, f.sharpness),
+                key=lambda f: (not f.eyes_closed, f.score if f.eyes_checked else f.sharpness),
                 reverse=True,
             )
             for frame in frames:
@@ -401,17 +719,7 @@ class SmartCull:
         Returns a list of groups, each a sharpness-sorted list of
         ``CullResult``.
         """
-        results: list[CullResult] = []
-        for p in image_paths:
-            path = Path(p)
-            results.append(
-                CullResult(
-                    path=path,
-                    sharpness=self.calculate_sharpness(path),
-                    timestamp=self.get_timestamp(path),
-                    phash=self.perceptual_hash(path),
-                )
-            )
+        results = self.score_frames(image_paths)
 
         # Order by time so bursts are contiguous; undated frames trail behind.
         dated = sorted((r for r in results if r.timestamp), key=lambda r: r.timestamp)

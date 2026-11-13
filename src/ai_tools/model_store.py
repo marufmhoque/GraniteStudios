@@ -43,6 +43,11 @@ class ModelSpec:
     ``zoo_dir`` is the directory inside opencv_zoo's ``models/`` tree, used to
     build the direct media URL. ``label`` is what the user is told about when
     the model is missing.
+
+    ``url`` is for the few models that are not in opencv_zoo. When it is set
+    the file is fetched from exactly that address and nowhere else. The
+    digest check is identical either way, so a different host changes where
+    the bytes come from, not how far they are trusted.
     """
 
     filename: str
@@ -50,6 +55,7 @@ class ModelSpec:
     size: int
     zoo_dir: str
     label: str
+    url: str | None = None
 
     @property
     def path(self) -> Path:
@@ -131,12 +137,15 @@ def ensure_model(spec: ModelSpec, download: bool = True, timeout: int = 300) -> 
     if not download:
         return None
 
-    candidates = [spec.media_url]
-    lfs = _lfs_download_url(spec)
-    if lfs:
-        # Signed LFS URL first: it is the only one that works when the media
-        # host is unreachable, which is common behind proxies.
-        candidates.insert(0, lfs)
+    if spec.url:
+        candidates = [spec.url]
+    else:
+        candidates = [spec.media_url]
+        lfs = _lfs_download_url(spec)
+        if lfs:
+            # Signed LFS URL first: it is the only one that works when the
+            # media host is unreachable, which is common behind proxies.
+            candidates.insert(0, lfs)
 
     for url in candidates:
         try:

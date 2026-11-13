@@ -106,10 +106,34 @@ class Face:
     left_eye: tuple[float, float]
     right_eye_state: EyeState | None = None
     left_eye_state: EyeState | None = None
+    # The detector also reports the nose tip and both mouth corners. They
+    # are kept so recognition and expression models can align the face.
+    nose: tuple[float, float] | None = None
+    right_mouth: tuple[float, float] | None = None
+    left_mouth: tuple[float, float] | None = None
 
     @property
     def box(self) -> tuple[int, int, int, int]:
         return self.x, self.y, self.w, self.h
+
+    @property
+    def landmarks5(self) -> np.ndarray | None:
+        """Right eye, left eye, nose, right mouth, left mouth as a 5x2 array."""
+        if self.nose is None or self.right_mouth is None or self.left_mouth is None:
+            return None
+        return np.array(
+            [self.right_eye, self.left_eye, self.nose, self.right_mouth, self.left_mouth],
+            dtype=np.float32,
+        )
+
+    def detector_row(self) -> np.ndarray | None:
+        """The 15-value row OpenCV's face recogniser expects for alignment."""
+        points = self.landmarks5
+        if points is None:
+            return None
+        return np.concatenate(
+            [[self.x, self.y, self.w, self.h], points.reshape(-1), [self.confidence]]
+        ).astype(np.float32)
 
     @property
     def interocular(self) -> float:
@@ -150,6 +174,8 @@ class FaceReport:
     faces: list[Face]
     model_available: bool = True
     error: str | None = None
+    # (width, height) of the image the coordinates refer to, when known.
+    frame_size: tuple[int, int] | None = None
 
     @property
     def face_count(self) -> int:
@@ -334,6 +360,9 @@ class FaceAnalyzer:
                 confidence=float(row[14]),
                 right_eye=(float(row[4]), float(row[5])),
                 left_eye=(float(row[6]), float(row[7])),
+                nose=(float(row[8]), float(row[9])),
+                right_mouth=(float(row[10]), float(row[11])),
+                left_mouth=(float(row[12]), float(row[13])),
             )
             if measure_eyes and gray is not None:
                 span = face.interocular
@@ -361,40 +390,64 @@ class FaceAnalyzer:
             return FaceReport(faces=[], model_available=False, error=self._load_error)
         return FaceReport(faces=self.detect(image, measure_eyes=measure_eyes))
 
+    def detect_reduced(self, image: np.ndarray, max_side: int) -> list[Face]:
+        """Find faces on a shrunken copy; report them in ``image``'s pixels.
+
+        Detection cost grows with pixel count and does not spread across
+        threads (measured: 80 ms at 1600 px, 21 ms at 800 px, and no faster
+        from seven workers than from one). Finding a face does not need the
+        resolution that judging its eyes does, so the search runs small and
+        the caller measures the eyes on the full image. Eye state is not
+        measured here.
+        """
+        h, w = image.shape[:2]
+        scale = max_side / float(max(h, w))
+        if scale >= 1.0:
+            return self.detect(image, measure_eyes=False)
+        small = cv2.resize(image, (max(1, round(w * scale)), max(1, round(h * scale))),
+                           interpolation=cv2.INTER_AREA)
+        faces = self.detect(small, measure_eyes=False)
+        inv = 1.0 / scale
+        for f in faces:
+            f.x, f.y, f.w, f.h = (int(round(v * inv)) for v in (f.x, f.y, f.w, f.h))
+            for name in ("right_eye", "left_eye", "nose", "right_mouth", "left_mouth"):
+                point = getattr(f, name)
+                if point is not None:
+                    setattr(f, name, (point[0] * inv, point[1] * inv))
+        return faces
+
+    def measure_eyes(self, gray: np.ndarray, face: Face) -> None:
+        """Score both eyes of an already-detected face by patch darkness.
+
+        The fallback for when the face mesh is unavailable. See the module
+        docstring for what this heuristic can and cannot tell.
+        """
+        span = face.interocular
+        if span < 8.0:
+            return
+        for attr, centre in (("right_eye_state", face.right_eye), ("left_eye_state", face.left_eye)):
+            score = eye_openness(gray, centre, span)
+            if score is not None:
+                setattr(face, attr, EyeState(openness=score, is_open=score >= self.eye_open_threshold))
+
     def analyze_path(self, path: str | Path, max_side: int = 1600) -> FaceReport:
         """Analyse an image file.
 
-        Large frames are downscaled first: detection accuracy is unaffected
-        at these face sizes and it keeps a thousand-frame pass tractable.
-        Landmarks are mapped back to original-image coordinates.
+        Works on a preview no larger than ``max_side``, which for a RAW is
+        the camera's embedded JPEG rather than a full demosaic: detection
+        accuracy is unaffected at these face sizes, and it is what keeps a
+        thousand-frame pass tractable. Coordinates are in that preview's
+        pixels; ``FaceReport.frame_size`` gives its dimensions so a caller
+        can scale them onto another rendering of the same frame.
         """
         if not self.available:
             return FaceReport(faces=[], model_available=False, error=self._load_error)
 
+        from src.engine import fast_preview
+
         path = Path(path)
-        image = cv2.imread(str(path), cv2.IMREAD_COLOR)
-        if image is None:
-            # RAW and HEIC need the project loader rather than cv2.imread.
-            try:
-                from src.engine.universal_loader import UniversalLoader
-
-                rgb = UniversalLoader().load_array(path)
-                image = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-            except Exception as exc:
-                return FaceReport(faces=[], error=f"Could not read {path.name}: {exc}")
-
-        h, w = image.shape[:2]
-        scale = 1.0
-        if max(h, w) > max_side:
-            scale = max_side / float(max(h, w))
-            image = cv2.resize(image, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
-
-        faces = self.detect(image)
-        if scale != 1.0 and faces:
-            inv = 1.0 / scale
-            for f in faces:
-                f.x, f.y = int(f.x * inv), int(f.y * inv)
-                f.w, f.h = int(f.w * inv), int(f.h * inv)
-                f.right_eye = (f.right_eye[0] * inv, f.right_eye[1] * inv)
-                f.left_eye = (f.left_eye[0] * inv, f.left_eye[1] * inv)
-        return FaceReport(faces=faces)
+        preview = fast_preview.load_preview(path, max_side=max_side)
+        if preview is None:
+            return FaceReport(faces=[], error=f"Could not read {path.name}")
+        image = cv2.cvtColor(preview.image, cv2.COLOR_RGB2BGR)
+        return FaceReport(faces=self.detect(image), frame_size=preview.size)

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import shutil
+import re
 import subprocess
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -72,10 +73,39 @@ class VideoProbe:
         return self.width / self.height if self.height else 0.0
 
     @property
+    def codec_label(self) -> str:
+        """A readable codec name, e.g. "ProRes 422 HQ" for ``apch``."""
+        return CODEC_NAMES.get(self.codec_fourcc.lower(), self.codec_fourcc)
+
+    @property
+    def is_intermediate_codec(self) -> bool:
+        """True for editing codecs (ProRes, DNxHD/HR) rather than delivery ones."""
+        return self.codec_label.startswith(("ProRes", "DNx"))
+
+    @property
     def duration_label(self) -> str:
         m, s = divmod(int(self.duration_sec), 60)
         h, m = divmod(m, 60)
         return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+
+
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".mkv", ".mxf", ".avi"}
+
+# FourCC (lower-cased) -> name. OpenCV reports the container's sample-entry
+# code, which for the editing codecs identifies the exact flavour.
+CODEC_NAMES = {
+    "avc1": "H.264", "h264": "H.264", "x264": "H.264",
+    "hvc1": "H.265 / HEVC", "hev1": "H.265 / HEVC", "hevc": "H.265 / HEVC",
+    "av01": "AV1", "vp09": "VP9", "vp90": "VP9", "vp80": "VP8",
+    "apco": "ProRes 422 Proxy", "apcs": "ProRes 422 LT", "apcn": "ProRes 422",
+    "apch": "ProRes 422 HQ", "ap4h": "ProRes 4444", "ap4x": "ProRes 4444 XQ",
+    "avdn": "DNxHD", "avdh": "DNxHR",
+    "mjpg": "Motion JPEG", "mp4v": "MPEG-4 Part 2", "fmp4": "MPEG-4 Part 2",
+}
+
+
+def is_video(path: str | Path) -> bool:
+    return Path(path).suffix.lower() in VIDEO_EXTENSIONS
 
 
 def probe(path: str | Path) -> VideoProbe:
@@ -99,7 +129,11 @@ def probe(path: str | Path) -> VideoProbe:
     finally:
         cap.release()
 
-    has_audio = _probe_has_audio(path)
+    listing = _stream_listing(path)
+    has_audio = "Audio:" in listing
+    # OpenCV reports one tag per codec family ("apch" for every ProRes
+    # flavour). The container's own tag says which flavour it actually is.
+    fourcc = _container_video_tag(listing) or fourcc
     return VideoProbe(
         path=path,
         width=width,
@@ -111,6 +145,20 @@ def probe(path: str | Path) -> VideoProbe:
         has_audio=has_audio,
         container=path.suffix.lstrip(".").lower(),
     )
+
+
+_VIDEO_TAG = re.compile(r"Video:.*?\((\w{4}) / 0x[0-9A-Fa-f]+\)")
+
+
+def _stream_listing(path: Path) -> str:
+    """ffmpeg's stream table for a file (see :func:`_probe_has_audio`)."""
+    cmd = [get_ffmpeg_exe(), "-hide_banner", "-i", str(path)]
+    return subprocess.run(cmd, capture_output=True, text=True, errors="replace").stderr
+
+
+def _container_video_tag(listing: str) -> str | None:
+    match = _VIDEO_TAG.search(listing)
+    return match.group(1) if match else None
 
 
 def _probe_has_audio(path: Path) -> bool:

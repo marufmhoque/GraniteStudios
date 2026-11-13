@@ -189,9 +189,8 @@ class ThumbnailWorker(QThread):
         for i, path in enumerate(self.paths, start=1):
             if self._cancelled:
                 break
-            preview = self.loader.load_preview(path)
-            if preview is not None and not self._cancelled:
-                thumb = preview.copy()
+            thumb = self.loader.load_thumbnail(path, size=THUMB_SIZE * 2)
+            if thumb is not None and not self._cancelled:
                 thumb.thumbnail((THUMB_SIZE, THUMB_SIZE), Image.Resampling.LANCZOS)
                 self.thumb_ready.emit(str(path), pil_to_pixmap(thumb))
             if not self._cancelled:

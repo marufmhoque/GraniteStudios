@@ -1,8 +1,9 @@
 """Universal image loader for Granite Studios.
 
 Handles every input format a working photographer throws at it:
-  * DSLR/mirrorless RAW (.nef, .cr2, .arw, .dng, .raf, .orf, .rw2) via rawpy,
-    preferring the camera's embedded JPEG thumbnail for high-speed previews.
+  * DSLR/mirrorless RAW (.nef, .cr2, .cr3, .arw, .dng, .raf, .orf, .rw2,
+    .pef, .3fr) via rawpy. Previews come from src/engine/fast_preview.py,
+    which prefers the camera's embedded JPEG over developing the sensor data.
   * Apple HEIC/HEIF via pillow-heif.
   * Standard JPEG / PNG / TIFF / WebP / BMP via Pillow.
 
@@ -17,20 +18,23 @@ import logging
 import threading
 from collections import OrderedDict
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 import rawpy
-from PIL import Image
+from PIL import Image, ImageOps
 
 import pillow_heif
 
 # Register HEIF/HEIC support with Pillow once, at import time.
 pillow_heif.register_heif_opener()
 
+from src.engine import fast_preview  # noqa: E402
+
 logger = logging.getLogger(__name__)
 
-RAW_EXTENSIONS = {".nef", ".cr2", ".cr3", ".arw", ".dng", ".raf", ".orf", ".rw2"}
+RAW_EXTENSIONS = fast_preview.RAW_EXTENSIONS
 HEIF_EXTENSIONS = {".heic", ".heif"}
 STANDARD_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp", ".bmp"}
 SUPPORTED_EXTENSIONS = RAW_EXTENSIONS | HEIF_EXTENSIONS | STANDARD_EXTENSIONS
@@ -44,6 +48,11 @@ _EXIF_EXPOSURE_TIME = 0x829A
 _EXIF_FNUMBER = 0x829D
 _EXIF_ISO = 0x8827
 _EXIF_LENS_MODEL = 0xA434
+_EXIF_BODY_SERIAL = 0xA431
+_EXIF_LENS_SERIAL = 0xA435
+_EXIF_FOCAL_LENGTH = 0x920A
+_EXIF_FOCAL_35MM = 0xA405
+_EXIF_OFFSET_TIME = 0x9011      # UTC offset of DateTimeOriginal
 
 
 @dataclass
@@ -56,6 +65,21 @@ class ImageMetadata:
     iso: int | None = None
     aperture: float | None = None
     shutter_speed: str | None = None
+    # Added in 2.0. All optional: older callers construct this positionally.
+    focal_length: float | None = None
+    focal_length_35mm: int | None = None
+    body_serial: str | None = None
+    lens_serial: str | None = None
+    captured_at: datetime | None = None
+    utc_offset: str | None = None
+    color_profile: str | None = None
+
+    @property
+    def focal_label(self) -> str:
+        if self.focal_length is None:
+            return ""
+        value = ("%.1f" % self.focal_length).rstrip("0").rstrip(".")
+        return f"{value}mm"
 
     @property
     def camera_label(self) -> str:
@@ -106,6 +130,11 @@ class ImageMetadata:
             "lens": self.lens_label,
             "settings": self.settings_label,
             "gear": self.gear_label,
+            "focal_length": self.focal_label,
+            "captured_at": self.captured_at.isoformat() if self.captured_at else "",
+            "color_profile": self.color_profile or "",
+            "body_serial": self.body_serial or "",
+            "lens_serial": self.lens_serial or "",
         }
 
 
@@ -161,6 +190,30 @@ class UniversalLoader:
             if p.is_file() and p.suffix.lower() in SUPPORTED_EXTENSIONS
         )
 
+    def scan_videos(self, folder: str | Path) -> list[Path]:
+        """Return every video file in a folder, sorted by name."""
+        from src.video.ffmpeg_utils import VIDEO_EXTENSIONS
+
+        folder = Path(folder)
+        if not folder.is_dir():
+            return []
+        return sorted(
+            p for p in folder.iterdir()
+            if p.is_file() and p.suffix.lower() in VIDEO_EXTENSIONS
+        )
+
+    def live_photo_pairs(self, folder: str | Path) -> dict[Path, Path]:
+        """Stills in a folder mapped to the clip that shares their name."""
+        from src.engine import phone_media
+
+        return phone_media.find_live_photo_pairs(folder)
+
+    def media_traits(self, path: str | Path, live_pairs: dict | None = None):
+        """Phone-specific structure of one file (gain map, motion clip, ...)."""
+        from src.engine import phone_media
+
+        return phone_media.inspect(path, live_pairs)
+
     def load_preview(self, path: str | Path) -> Image.Image | None:
         """Load a fast RGB preview (RAM-cached). Ideal for grid thumbnails."""
         path = Path(path)
@@ -195,11 +248,28 @@ class UniversalLoader:
                         output_bps=8,
                     )
                 return Image.fromarray(rgb)
-            image = Image.open(path)
+            # Honour the EXIF orientation flag, so a phone photo taken in
+            # portrait is exported upright rather than on its side.
+            image = ImageOps.exif_transpose(Image.open(path))
             return self._to_rgb(image)
         except Exception:
             logger.exception("Failed to load full image: %s", path)
             return None
+
+    def load_thumbnail(self, path: str | Path, size: int = 320) -> Image.Image | None:
+        """A small preview for the grid, as fast as the file allows.
+
+        Accepts whatever preview the file carries, however small, so a
+        folder of phone DNGs fills the grid without developing each frame.
+        Not cached: the analysis-size preview is a different image.
+        """
+        preview = fast_preview.load_preview(path, max_side=size, min_side=0)
+        return preview.to_pil() if preview is not None else None
+
+    def load_analysis(self, path: str | Path, max_side: int = 1600) -> np.ndarray | None:
+        """An upright RGB array sized for analysis rather than display."""
+        preview = fast_preview.load_preview(path, max_side=max_side)
+        return preview.image if preview is not None else None
 
     def load_array(self, path: str | Path) -> np.ndarray | None:
         """Load the full image as an RGB numpy array (for the AI pipelines)."""
@@ -304,6 +374,7 @@ class UniversalLoader:
         aperture = self._clean_float(sub.get(_EXIF_FNUMBER))
         shutter = self._format_shutter(sub.get(_EXIF_EXPOSURE_TIME))
 
+        focal_35 = sub.get(_EXIF_FOCAL_35MM)
         return ImageMetadata(
             camera_make=make,
             camera_model=model,
@@ -311,7 +382,28 @@ class UniversalLoader:
             iso=iso,
             aperture=aperture,
             shutter_speed=shutter,
+            focal_length=self._clean_float(sub.get(_EXIF_FOCAL_LENGTH)),
+            focal_length_35mm=int(focal_35) if isinstance(focal_35, (int, float)) and focal_35 else None,
+            body_serial=self._clean_str(sub.get(_EXIF_BODY_SERIAL)),
+            lens_serial=self._clean_str(sub.get(_EXIF_LENS_SERIAL)),
+            captured_at=fast_preview.read_capture_time(img),
+            utc_offset=self._clean_str(sub.get(_EXIF_OFFSET_TIME)),
+            color_profile=self._profile_name(img),
         )
+
+    @staticmethod
+    def _profile_name(img: Image.Image) -> str | None:
+        """Name of the embedded ICC profile, e.g. "Display P3"."""
+        icc = img.info.get("icc_profile")
+        if not icc:
+            return None
+        try:
+            from PIL import ImageCms
+
+            profile = ImageCms.ImageCmsProfile(io.BytesIO(icc))
+            return (ImageCms.getProfileDescription(profile) or "").strip() or None
+        except Exception:
+            return None
 
     @staticmethod
     def _clean_str(value) -> str | None:
@@ -353,39 +445,8 @@ class UniversalLoader:
     # ------------------------------------------------------------------ #
 
     def _decode_preview(self, path: Path) -> Image.Image | None:
-        ext = path.suffix.lower()
-
-        if ext in RAW_EXTENSIONS:
-            return self._decode_raw_preview(path)
-
-        # HEIC is registered with Pillow via pillow-heif, so both HEIF and
-        # standard formats go through Image.open.
-        image = Image.open(path)
-        return self._to_rgb(image)
-
-    def _decode_raw_preview(self, path: Path) -> Image.Image | None:
-        """Extract the embedded JPEG thumbnail from a RAW file.
-
-        This is 10-50x faster than a full demosaic, which is what makes
-        RAM-cached culling viable on modest hardware. Falls back to a
-        half-size demosaic if no usable thumbnail is embedded.
-        """
-        with rawpy.imread(str(path)) as raw:
-            try:
-                thumb = raw.extract_thumb()
-            except (rawpy.LibRawNoThumbnailError, rawpy.LibRawUnsupportedThumbnailError):
-                thumb = None
-
-            if thumb is not None:
-                if thumb.format == rawpy.ThumbFormat.JPEG:
-                    image = Image.open(io.BytesIO(thumb.data))
-                    return self._to_rgb(image)
-                if thumb.format == rawpy.ThumbFormat.BITMAP:
-                    return Image.fromarray(thumb.data)
-
-            # Fallback: fast half-size demosaic.
-            rgb = raw.postprocess(half_size=True, use_camera_wb=True, output_bps=8)
-            return Image.fromarray(rgb)
+        preview = fast_preview.load_preview(path, max_side=self.preview_max_px)
+        return preview.to_pil() if preview is not None else None
 
     @staticmethod
     def _to_rgb(image: Image.Image) -> Image.Image:

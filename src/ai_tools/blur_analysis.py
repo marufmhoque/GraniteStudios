@@ -183,25 +183,24 @@ def analyze(
 
     if isinstance(image, (str, Path)):
         path = Path(image)
-        array = cv2.imread(str(path), cv2.IMREAD_COLOR)
-        if array is None:
-            # RAW and HEIC need the project loader, not cv2.imread.
-            try:
-                from src.engine.universal_loader import UniversalLoader
+        # exact=True: a full decode shrunk once, which is the chain every
+        # threshold below was calibrated on. For a RAW this is the embedded
+        # JPEG, not a demosaic.
+        from src.engine import fast_preview
 
-                rgb = UniversalLoader().load_array(path)
-                array = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-            except Exception as exc:
-                return BlurReport(
-                    sharpness=0.0,
-                    directionality=0.0,
-                    motion_angle=None,
-                    verdict=OUT_OF_FOCUS,
-                    is_blurry=False,
-                    recoverable=False,
-                    strictness=strictness,
-                    error=f"Could not read {path.name}: {exc}",
-                )
+        preview = fast_preview.load_preview(path, max_side=None, exact=True)
+        if preview is None:
+            return BlurReport(
+                sharpness=0.0,
+                directionality=0.0,
+                motion_angle=None,
+                verdict=OUT_OF_FOCUS,
+                is_blurry=False,
+                recoverable=False,
+                strictness=strictness,
+                error=f"Could not read {path.name}",
+            )
+        array = cv2.cvtColor(preview.image, cv2.COLOR_RGB2BGR)
     else:
         array = image
 
@@ -259,12 +258,23 @@ def sharpen(image: np.ndarray, strength: float = 1.0) -> np.ndarray:
     return np.clip(sharpened, 0, 255).astype(np.uint8)
 
 
-def analyze_many(paths, strictness: str = DEFAULT_STRICTNESS, progress=None) -> dict:
-    """Analyse a list of paths, returning ``{path_string: BlurReport}``."""
+def analyze_many(paths, strictness: str = DEFAULT_STRICTNESS, progress=None, workers=None) -> dict:
+    """Analyse a list of paths, returning ``{path_string: BlurReport}``.
+
+    Runs on a thread pool: decoding and the OpenCV filters both release the
+    GIL, and nothing here shares state between frames.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    from src.engine import fast_preview
+
+    ordered = [str(p) for p in paths]
+    total = len(ordered)
     results: dict[str, BlurReport] = {}
-    total = len(paths)
-    for index, path in enumerate(paths, start=1):
-        results[str(path)] = analyze(path, strictness=strictness)
-        if progress:
-            progress(index, total)
+    with ThreadPoolExecutor(max_workers=workers or fast_preview.default_workers()) as pool:
+        reports = pool.map(lambda p: analyze(Path(p), strictness=strictness), ordered)
+        for index, (key, report) in enumerate(zip(ordered, reports), start=1):
+            results[key] = report
+            if progress:
+                progress(index, total)
     return results

@@ -712,17 +712,14 @@ class PoseAnalyzer:
         if not self.available:
             return PoseReport(model_available=False, error=self._load_error)
 
-        path = Path(path)
-        image = cv2.imread(str(path), cv2.IMREAD_COLOR)
-        if image is None:
-            try:
-                from src.engine.universal_loader import UniversalLoader
+        from src.engine import fast_preview
 
-                rgb = UniversalLoader().load_array(path)
-                image = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-            except Exception as exc:
-                return PoseReport(error=f"Could not read {path.name}: {exc}")
-        return self.analyze(image)
+        path = Path(path)
+        preview = fast_preview.load_preview(path, max_side=ANALYSIS_MAX_SIDE)
+        if preview is None:
+            return PoseReport(error=f"Could not read {path.name}")
+        # Landmarks come back in this preview's pixels.
+        return self.analyze(cv2.cvtColor(preview.image, cv2.COLOR_RGB2BGR))
 
     def body_tilt(self, image: np.ndarray) -> tuple[float | None, float]:
         """Camera roll from the main subject's body: ``(degrees, confidence)``."""
