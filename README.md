@@ -24,6 +24,73 @@ Six workspaces over one folder: **Cull**, **Develop**, **Retouch**, **Design**, 
 - ✍️ **Design**: vector text, shapes and watermarks that print sharp at any size and export to SVG and PDF
 - 💾 **Non-destructive**: every edit is a small settings file. Nothing is rendered until you export, and your originals are never modified, moved or deleted
 
+## Granite Studios at a glance
+
+**What it is.** A desktop app (Windows first, macOS build provided) that takes a folder of photographs from a shoot and carries it all the way to delivery: pick the keepers, develop them, retouch them, put your name on them, and export. It also edits video. Everything runs on your own computer.
+
+**Who it is for.** Working photographers (weddings, events, portraits, sport) who come home with a thousand frames, and content creators who want the same tools without a subscription or an upload.
+
+**The promises it keeps** (each is tested; see [PRD.md](PRD.md) section 3):
+
+| Promise | What it means in practice |
+| --- | --- |
+| **Originals are never touched** | Files in your folder are never modified, moved, renamed or deleted. "Reject" only leaves a frame out of exports. A test hashes every original before and after every action |
+| **Your photos never leave your computer** | No upload, no account, no telemetry. The only network use is downloading AI models (each one asks first) and the installer itself |
+| **Edits are settings, not pictures** | Each frame's edit is a small `.granite.json` file in the `-edit` folder. Change or undo anything, any time; nothing is rendered until you export |
+| **It degrades, it does not guess** | A missing model, an unreadable file or a damaged settings file switches that feature off or opens the photo unedited, and says so. It never invents a result |
+| **It does not claim what it has not measured** | Every figure here comes from a recorded run, and the README says what each one does and does not show |
+
+**What is in the box**
+
+| Area | Highlights |
+| --- | --- |
+| Input | ten camera RAW formats, phone DNG, 10-bit HEIC, Ultra HDR, Motion and Live Photos, JPEG, PNG, TIFF, MP4/MOV/MKV/WebM/ProRes/DNxHD |
+| Cull | Sharpness on the faces, blink and smile from a 478-point mesh, duplicate and burst grouping, cull to a target count, survey and face loupe, group by person, ratings and labels written to `.xmp` |
+| Develop | 32-bit float engine: tone, curves, 8-band HSL, colour grading, dehaze, lens profiles, `.cube` LUTs, straighten, keystone, copy and sync settings, clipping view |
+| Retouch | Layers (7 blend modes), AI masks (subject, skin, teeth, eyes, iris, lips; hair and sky approximate), click-to-select, healing, cloning, frequency-separation skin smoothing, teeth and eyes, neural inpainting |
+| Design | Vector text, shapes and bezier paths; watermark templates filled from each photo's EXIF; snapping and guides; SVG and PDF output |
+| Export | Web, full-size, 16-bit TIFF, print and 16-bit PNG presets; Instagram sets; panoramic reel; static web gallery; transparent-background PNG |
+| Video | Trim, speed, reverse, time-lapse, reframe, stabilise, crop, redact, concat, transitions, loudness, colour and LUTs; bundled FFmpeg |
+
+**The AI models it uses, and why you can trust them.** All run locally. Each is pinned by size and SHA-256, so a corrupted or swapped download is refused. Small ones come with the install; larger ones are fetched only when you say yes.
+
+| Model | Job | Size | Fetched |
+| --- | --- | --- | --- |
+| YuNet | Find faces | 0.2 MB | Installer |
+| MediaPipe face landmarker | 478-point mesh: eyes, smile, head roll | 3.8 MB | Installer |
+| U2Net (via `rembg`) | Remove backgrounds, find the subject | 176 MB | Installer |
+| BlazePose | Body posture for levelling | 17.5 MB | On consent |
+| SFace | Recognise the same person | 38.7 MB | On consent |
+| PP-HumanSeg | Person mask | 6.2 MB | On consent |
+| EfficientSAM-Ti | Click-to-select, hair | 48.3 MB | On consent |
+| LaMa | Fill corners and remove objects | 92.6 MB | On consent |
+
+**Measured, on an i5-8350U laptop with 32 GB RAM and no dedicated graphics:**
+
+- 1,000 camera RAWs culled in **42 to 104 seconds** depending on the camera (nine cameras; five under 90 s)
+- Develop slider moves render in about **15 ms** from a 1,600 px proxy, using the same pipeline as export
+- Straightening: under **1 degree** residual from scene lines, **0.6 degree** mean from the body when there are no lines
+- Background removal **1.36 times faster** on DirectML than CPU
+- **493 automated tests** against real engines, 18,500 lines of application code and 4,700 lines of tests
+
+**What it cannot do yet** (full list with reasons in [PRD.md](PRD.md) section 8):
+
+- Blink and smile detection is checked on four reference faces, not on a labelled set of real blinks. Treat it as a strong filter, not a verdict
+- Hair and sky masks and neural-fill quality are unjudged on real work
+- Apple ProRAW tone-map tables are detected but not applied
+- macOS builds but has not been run by the author; the hosted browser build is not deployed
+- No client proofing, favourites, print ordering or trained "AI profile" from a Lightroom catalogue; those need hosted services
+
+**Keyboard cheat sheet**
+
+| Where | Keys |
+| --- | --- |
+| Anywhere | **Ctrl+1 to Ctrl+6** switch workspace |
+| Cull | Arrows move; **1-5** stars (0 clears); **6-9** red, yellow, green, blue; **P** pick; **X** reject; **U** clear; **S** survey; **F** face loupe; **Enter** open in Develop |
+| Develop | Left/Right change frame; **\\** before/after; **J** clipping; **Ctrl+Z / Ctrl+Y** undo, redo; **Ctrl+Shift+C / V** copy, paste settings; **0** fit; **1** 100% |
+
+**Where to go next:** [Quick Start](#quick-start) to install, [Features](#features) for every control, [Architecture Highlights](#architecture-highlights) for how edits are stored, and [PRD.md](PRD.md) for every requirement with its evidence.
+
 ## Quick Start
 
 ### Windows (recommended)
