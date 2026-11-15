@@ -15,6 +15,7 @@ import ctypes
 import logging
 import platform
 import sys
+import threading
 from pathlib import Path
 
 # Ensure the project root is importable regardless of invocation directory.
@@ -55,6 +56,9 @@ def main() -> int:
 
     app = QApplication(sys.argv)
     app.setApplicationName("Granite Studios")
+    from src import __version__
+
+    app.setApplicationVersion(__version__)
 
     app_font = QFont()
     app_font.setFamilies(["Inter", "Segoe UI", "Roboto", "sans-serif"])
@@ -92,7 +96,7 @@ def main() -> int:
 
     # Heavy imports (engine + AI modules) happen here, while the splash is
     # already visible, so the delay is hidden rather than dead air.
-    from src.engine.create_shortcut import create_desktop_shortcut
+    from src.engine.create_shortcut import create_desktop_shortcut, repair_shortcut_icons
     from src.ui.main_window import MainWindow
 
     window = MainWindow()
@@ -101,6 +105,9 @@ def main() -> int:
     # launches don't require digging through a dist/ folder for the .exe.
     # No-ops instantly on every launch after the first (marker-file check).
     create_desktop_shortcut()
+    # Shortcuts from older installs point at icon.png and show a blank page;
+    # give them the logo. Off the UI thread: it may start PowerShell.
+    threading.Thread(target=repair_shortcut_icons, daemon=True).start()
 
     # Hold the splash for its full duration without blocking the event
     # loop, then hand off to the main window.

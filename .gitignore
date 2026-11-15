@@ -221,9 +221,9 @@ __marimo__/
 *_graded.jpg
 *.mp4
 
-# Generated icon formats — regenerated from icon.png by package_windows.py
-# / build.yml on every build, never hand-edited.
-icon.ico
+# Generated macOS icon — regenerated from icon.png by build.yml on every
+# build. icon.ico is tracked: installs downloaded from GitHub need it, as a
+# Windows shortcut cannot show a PNG. Regenerate it with package_windows.py.
 icon.icns
 
 # OS / editor

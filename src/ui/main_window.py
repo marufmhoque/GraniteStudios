@@ -80,7 +80,9 @@ def _session_field(name: str):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Granite Studios")
+        from src import __version__
+
+        self.setWindowTitle(f"Granite Studios v{__version__}")
         self.resize(1440, 900)
         self.setStyleSheet(CRIMSON_GRANITE_STYLESHEET + WORKSPACE_STYLE)
         icon_path = resource_path("icon.png")

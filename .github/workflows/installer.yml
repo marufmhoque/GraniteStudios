@@ -138,6 +138,22 @@ jobs:
           }
           Write-Host 'ok: no 2>&1 capture of native commands'
 
+      - name: Version went up by this update
+        if: github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000'
+        shell: pwsh
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          # Every update raises the version by 0.01 (tools/bump_version.py),
+          # and every copy of it (README, pyproject, installer) must agree.
+          git fetch --quiet --depth=1 origin $env:BEFORE
+          git show "$($env:BEFORE):src/__init__.py" | Set-Content -Encoding utf8 previous_init.py
+          python tools/bump_version.py --check --previous previous_init.py
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host '::error::the app changed but its version did not go up; run python tools/bump_version.py'
+            exit 1
+          }
+
       - name: Application code compiles
         shell: pwsh
         run: |

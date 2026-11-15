@@ -119,6 +119,67 @@ def _windows_shortcut_dirs() -> list[Path]:
     return [desktop, start]
 
 
+def _shortcut_icon() -> str | None:
+    """The icon file for a shortcut: an .ico on Windows, which cannot show a
+    PNG on a shortcut, and the PNG elsewhere."""
+    if platform.system() == "Windows":
+        from src.engine.app_icon import windows_icon
+
+        icon_path = windows_icon()
+    else:
+        icon_path = resource_path("icon.png")
+    return str(icon_path) if icon_path is not None and icon_path.exists() else None
+
+
+# How a PNG icon location is spelled inside a .lnk (its strings are UTF-16).
+_PNG_IN_LNK = ".png".encode("utf-16-le")
+
+
+def stale_shortcuts() -> list[Path]:
+    """This app's Windows shortcuts whose icon is a PNG, which Explorer
+    shows as a blank page. Installs made before 2.00 wrote these."""
+    if platform.system() != "Windows":
+        return []
+    stale = []
+    for directory in _windows_shortcut_dirs():
+        lnk = directory / f"{APP_NAME}.lnk"
+        try:
+            if _PNG_IN_LNK in lnk.read_bytes().lower():
+                stale.append(lnk)
+        except OSError:
+            continue
+    return stale
+
+
+def repair_shortcut_icons() -> int:
+    """Point any stale shortcut at the .ico logo. Returns how many were
+    fixed. Cheap when there is nothing to do (it reads two small files);
+    never raises."""
+    try:
+        stale = stale_shortcuts()
+        icon = _shortcut_icon() if stale else None
+        if not stale or icon is None or not icon.lower().endswith(".ico"):
+            return 0
+        lines = ["$ErrorActionPreference = 'Stop'", "$sh = New-Object -ComObject WScript.Shell"]
+        for lnk in stale:
+            lines += [
+                f"$lnk = $sh.CreateShortcut({_ps_quote(str(lnk))})",
+                f"$lnk.IconLocation = {_ps_quote(icon + ',0')}",
+                "$lnk.Save()",
+            ]
+        subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+             "-Command", "; ".join(lines)],
+            check=True, capture_output=True, text=True,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        logger.info("Gave %d shortcut(s) the Granite Studios logo.", len(stale))
+        return len(stale)
+    except Exception:
+        logger.exception("Could not repair the shortcut icons")
+        return 0
+
+
 def create_desktop_shortcut(force: bool = False) -> bool:
     """Create Desktop + Start Menu shortcuts for Granite Studios.
 
@@ -130,10 +191,7 @@ def create_desktop_shortcut(force: bool = False) -> bool:
     if shortcut_already_created() and not force:
         return False
 
-    icon_path = resource_path("icon.ico")
-    if not icon_path.exists():
-        icon_path = resource_path("icon.png")
-    icon = str(icon_path) if icon_path.exists() else None
+    icon = _shortcut_icon()
 
     target, arguments = launch_command()
     working_dir = str(get_base_path().resolve())

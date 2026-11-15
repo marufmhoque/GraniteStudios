@@ -338,7 +338,22 @@ function New-AppShortcut($LnkPath, $Target, $Arguments, $WorkDir, $Icon) {
 $mainPy   = Join-Path $InstallDir 'main.py'
 $iconIco  = Join-Path $InstallDir 'icon.ico'
 $iconPng  = Join-Path $InstallDir 'icon.png'
-$icon     = if (Test-Path $iconIco) { $iconIco } elseif (Test-Path $iconPng) { $iconPng } else { $null }
+# A shortcut cannot show a PNG (it renders as a blank page), so make the
+# .ico from the logo if the download did not include one.
+if (-not (Test-Path $iconIco) -and (Test-Path $iconPng)) {
+    $icoScript = 'import sys; from PIL import Image; im = Image.open(sys.argv[1]).convert("RGBA"); s = max(im.size); c = Image.new("RGBA", (s, s), (0, 0, 0, 0)); c.paste(im, ((s - im.width) // 2, (s - im.height) // 2), im); c.save(sys.argv[2], format="ICO", sizes=[(n, n) for n in (16, 24, 32, 48, 64, 128, 256)])'
+    $ErrorActionPreference = 'Continue'
+    & $VenvPy -c $icoScript $iconPng $iconIco *> $null
+    $ErrorActionPreference = 'Stop'
+}
+$icon     = if (Test-Path $iconIco) { $iconIco } else { $null }
+# The version, as src/__init__.py states it, for Settings > Apps.
+$AppVersion = '2.00'
+$initPy = Join-Path $InstallDir 'src\__init__.py'
+if (Test-Path $initPy) {
+    $m = Select-String -Path $initPy -Pattern '__version__\s*=\s*"([^"]+)"' | Select-Object -First 1
+    if ($m) { $AppVersion = $m.Matches[0].Groups[1].Value }
+}
 $launcher = if (Test-Path $VenvPyW) { $VenvPyW } else { $VenvPy }
 
 Say 'Creating Desktop and Start Menu shortcuts...'
@@ -376,7 +391,7 @@ try {
     $regKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\GraniteStudios'
     New-Item -Path $regKey -Force | Out-Null
     Set-ItemProperty $regKey DisplayName     $AppName
-    Set-ItemProperty $regKey DisplayVersion  '1.0'
+    Set-ItemProperty $regKey DisplayVersion  $AppVersion
     Set-ItemProperty $regKey Publisher       'Granite Studios'
     Set-ItemProperty $regKey InstallLocation $InstallDir
     Set-ItemProperty $regKey UninstallString "`"$InstallDir\Uninstall Granite Studios.bat`""

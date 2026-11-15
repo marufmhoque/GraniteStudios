@@ -1,5 +1,7 @@
 # Granite Studios
 
+**Current version: v2.00**
+
 ### [⬇️ Download the installer](https://github.com/marufmhoque/GraniteStudios/releases/latest/download/Install-GraniteStudios.bat)
 
 One file. Download it, double-click it, done — it fetches the latest version
@@ -75,7 +77,7 @@ Six workspaces over one folder: **Cull**, **Develop**, **Retouch**, **Design**, 
 - Straightening: under **1 degree** residual from scene lines, **0.6 degree** mean from the body when there are no lines
 - Background removal **1.36 times faster** on DirectML than CPU
 - De-blurring recovers **+5.2 dB** on a synthetic 10 px motion smear; a full-quality pass takes about **4 s** on the 1,600 px preview and **66 s** on a 24 MP export (a fast Wiener pass follows the slider in about 150 ms)
-- **570 automated tests** against real engines, 20,300 lines of application code and 5,600 lines of tests
+- **580 automated tests** against real engines, 20,300 lines of application code and 5,600 lines of tests
 
 **What it cannot do yet** (full list with reasons in [PRD.md](PRD.md) section 8):
 
@@ -369,6 +371,20 @@ pyinstaller main.py --name "Granite Studios" --windowed --onedir \
 # Output: dist/Granite Studios.app
 ```
 
+### Versioning
+
+The version is major.minor with two decimals, kept in `src/__init__.py` and
+shown in the window title, in Settings ▸ Apps and at the top of this README.
+Every update raises it by 0.01 (2.00, 2.01, … 2.99, 3.00):
+
+```bash
+python tools/bump_version.py           # adds 0.01 and updates every copy
+python tools/bump_version.py --check   # every copy agrees
+```
+
+The installer workflow refuses to publish a change to the app whose version
+did not go up.
+
 ### Testing
 
 ```bash
@@ -377,7 +393,7 @@ python tests/fetch_media.py   # optional: CC0 camera RAW samples and reference f
 pytest
 ```
 
-**570 tests.** They drive the real engines and the real window (headless,
+**580 tests.** They drive the real engines and the real window (headless,
 with `QT_QPA_PLATFORM=offscreen`); nothing is mocked except file dialogs.
 Tests that need a downloaded model or sample file are marked `model` or
 `media` and skip themselves when it is absent.

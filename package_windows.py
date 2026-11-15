@@ -73,13 +73,14 @@ def convert_icons(project_root: Path, source_png: Path) -> tuple[Path | None, Pa
 
     from PIL import Image
 
-    image = Image.open(source_png).convert("RGBA")
+    sys.path.insert(0, str(project_root))
+    from src.engine.app_icon import square, write_ico
 
-    ico_path = project_root / "icon.ico"
-    image.save(ico_path, format="ICO", sizes=ICO_SIZES)
+    ico_path = write_ico(source_png, project_root / "icon.ico")
 
     icns_path = project_root / "icon.icns"
-    image.save(icns_path, format="ICNS")
+    with Image.open(source_png) as image:
+        square(image).save(icns_path, format="ICNS")
 
     print(f"Generated {ico_path.name} (Windows) and {icns_path.name} (macOS) from {source_png.name}.")
     return ico_path, icns_path

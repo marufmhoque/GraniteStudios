@@ -2,7 +2,7 @@
 
 | | |
 | --- | --- |
-| **Version** | 2.0 |
+| **Version** | 2.00 (app version; raised by 0.01 with every update) |
 | **Date** | 13 November 2026 |
 | **Status** | Living document — tracks `main` |
 | **Applies to** | version 2.0 (`v2` merged to `main`) and later |
@@ -63,9 +63,9 @@ workspaces. In summary:
 | Develop | Six fixed grades | Float parametric develop engine ([FR-7](#fr-7-develop-engine)) |
 | Retouching | None | Layers, masks, heal, clone, skin, teeth, eyes, inpainting ([FR-16](#fr-16-layers-masks-and-retouching)) |
 | Graphics | None | Vector text, shapes, watermarks; SVG and PDF ([FR-17](#fr-17-design-and-vector-graphics)) |
-| Versions | None | Virtual copies with style branches, added in 2.1 ([FR-19](#fr-19-versions-virtual-copies)) |
-| De-blur | Unsharp mask only | Deconvolution of motion and focus blur, added in 2.1 ([FR-20](#fr-20-de-blur-deconvolution)) |
-| Tests | None | **570** pytest tests ([7](#7-quality-and-verification)) |
+| Versions | None | Virtual copies with style branches, added in 2.00 ([FR-19](#fr-19-versions-virtual-copies)) |
+| De-blur | Unsharp mask only | Deconvolution of motion and focus blur, added in 2.00 ([FR-20](#fr-20-de-blur-deconvolution)) |
+| Tests | None | **580** pytest tests ([7](#7-quality-and-verification)) |
 
 ---
 
@@ -563,7 +563,7 @@ tile on the CPU (one measurement).
 
 ### FR-19 Versions (virtual copies)
 
-*(New in 2.1.)* A photograph can carry several independent edits of one
+*(New in 2.00.)* A photograph can carry several independent edits of one
 original, as Lightroom's virtual copies do.
 
 | ID | Requirement | Acceptance criteria | Status |
@@ -597,7 +597,7 @@ modes driven through the real window.
 
 ### FR-20 De-blur (deconvolution)
 
-*(New in 2.1.)* Recovers motion smear and missed focus by deconvolution:
+*(New in 2.00.)* Recovers motion smear and missed focus by deconvolution:
 inverting a modelled blur, not raising edge contrast. Sharpening
 ([FR-3](#fr-3-blur-triage)) remains for mild softness.
 
@@ -851,7 +851,7 @@ verified whole and unpacked in memory, so no unverified file reaches disk.
 
 ### 7.1 Approach
 
-**570 pytest tests** (569 pass and 1 skips on the development machine, where
+**580 pytest tests** (579 pass and 1 skips on the development machine, where
 the hosted backend's own requirements are not installed). They exercise the
 real engines and the real window — headless, with `QT_QPA_PLATFORM=offscreen`
 — and mock nothing but file dialogs and, in two tests, the network.
@@ -877,6 +877,7 @@ repository, which may sit on a synced drive.
 | `test_workspaces.py` | 21 | Every workspace driven end to end |
 | `test_versions.py` | 21 | Versions: settings-only copies, independence, names, persistence, styles, UI, export |
 | `test_deblur.py` | 58 | PSFs, 4.5 dB regression, damping, clamping, boundaries, tiling, estimators, preview = export, masks, model absence, Develop end to end |
+| `test_version_and_icon.py` | 10 | Two-decimal version agreed by every copy and published in the README, +0.01 bumps, the update check, the square multi-size .ico, shortcut icon repair |
 | `test_phone_media.py` | 18 | Live/Motion Photos, gain-map arithmetic, 10-bit HEIC, metadata |
 | `test_culling_score.py` | 16 | Keeper score arithmetic, composition, region sharpness, the mesh in a cull |
 | `test_hardware.py` | 14 | Provider choice per platform, fallback, agreement with the CPU |
