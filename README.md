@@ -81,7 +81,7 @@ Six workspaces over one folder: **Cull**, **Develop**, **Retouch**, **Design**, 
 
 - Blink and smile detection is checked on four reference faces, not on a labelled set of real blinks. Treat it as a strong filter, not a verdict
 - Hair and sky masks and neural-fill quality are unjudged on real work
-- De-blur is measured on synthetic blur only and assumes one blur for the whole frame; the optional AI de-blur model is slow (about 2 minutes for a preview on a laptop CPU) and gains only 1–2 dB on a photograph
+- De-blur is measured on synthetic blur only and assumes one blur for the whole frame; the optional AI de-blur mode is experimental: slow (about 2 minutes for a preview on a laptop CPU) and gains only 1–2 dB on a photograph
 - Apple ProRAW tone-map tables are detected but not applied
 - macOS builds but has not been run by the author; the hosted browser build is not deployed
 - No client proofing, favourites, print ordering or trained "AI profile" from a Lightroom catalogue; those need hosted services
@@ -244,7 +244,7 @@ filmstrip along the bottom.
 ### De-Blur
 Sharpening lifts edges that survived. **De-Blur** (Develop ▸ Detail) undoes the blur itself by *deconvolution*: it models the smear or the missed focus as a point spread function and solves for the sharp scene that produced the photo.
 - **Auto-Detect from Analysis** reads the smear's direction from the blur analysis and its length from the image's cepstrum (or, for missed focus, the blur's radius), in pixels of the full-size photo
-- **Mode**: *Motion* (Angle 0–180°, Smear Length 1–30 px), *Defocus* (Radius 1–20 px), or *AI Neural*, a 92 MB NAFNet model that needs no settings (downloaded only if you agree). It is slow, about 2 minutes for the preview on a laptop CPU, and its gain is modest: 1–2 dB on a smeared photograph, against 5 dB for Motion mode given the right blur
+- **Mode**: *Motion* (Angle 0–180°, Smear Length 1–30 px), *Defocus* (Radius 1–20 px), or *AI Neural (Experimental)*, a 92 MB NAFNet model that needs no settings (downloaded only if you agree). It is slow, about 2 minutes for the preview on a laptop CPU, and its gain is modest: 1–2 dB on a smeared photograph, against 5 dB for Motion mode given the right blur
 - **Suppression** (Artifact Suppression, 0–1) holds back ringing and noise; raise it on noisy, high-ISO frames
 - **Apply to**: the whole frame, the subject only, or faces only, so a clean background is not filled with amplified noise
 - While you drag a slider a fast Wiener filter follows it (about 150 ms on a laptop); when you let go, damped Richardson-Lucy renders the full-quality result (about 4 s). It runs in linear light, before lens correction and tone, exactly as the export does
@@ -516,7 +516,7 @@ nothing here reads as a promise the code does not keep.
 | Hair and sky masks | **Partial** — work, but unmeasured; offered as a starting point |
 | Skin smoothing, healing, cloning, teeth, eyes | **Done** |
 | Inpainting and corner fill | **Done** — fast fill always; neural fill with a 93 MB model. Quality not yet judged on real prints |
-| True de-blur (motion and defocus deconvolution) | **Done** on synthetic blur; the optional neural engine runs, but slowly (136 s for a preview on a laptop CPU) |
+| True de-blur (motion and defocus deconvolution) | **Done** on synthetic blur; the optional neural engine is experimental: it runs, but slowly (136 s for a preview on a laptop CPU) |
 | Vector text, shapes, watermarks, SVG and PDF | **Done** |
 | ProRAW local tone mapping | **Not built** — detected and reported, not applied |
 | AI profiles trained from a photographer's Lightroom catalogue | **Not built** — a training pipeline, the largest item in the spec |

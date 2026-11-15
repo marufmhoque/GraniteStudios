@@ -308,10 +308,14 @@ class DevelopWorkspace(Workspace):
                                         "Measure the smear's direction and length, or the focus blur's size")
         group.add(self.deblur_auto)
         self.deblur_mode = QComboBox()
-        for label, data in (("Motion", "motion"), ("Defocus", "defocus"), ("AI Neural", "neural")):
+        for label, data in (("Motion", "motion"), ("Defocus", "defocus"), ("AI Neural (Experimental)", "neural")):
             self.deblur_mode.addItem(label, data)
+        # The longest label is wider than the panel allows; let the box
+        # shrink to fit rather than push the panel into a sideways scroll.
+        self.deblur_mode.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.deblur_mode.setMinimumContentsLength(12)
         self.deblur_mode.setToolTip(
-            "Motion and Defocus deconvolve with the blur you describe below. AI Neural is a "
+            "Motion and Defocus deconvolve with the blur you describe below. AI Neural is an experimental "
             "trained model (92 MB download) that needs no settings but knows only motion blur. "
             "It is slow: about 2 minutes for the preview on a laptop, far longer for an export.")
         self.deblur_mode.currentIndexChanged.connect(self._on_deblur_mode)
@@ -653,7 +657,7 @@ class DevelopWorkspace(Workspace):
         self._show_deblur_controls()
         if mode == "neural":
             self.deblur_status.setText(
-                "AI Neural takes about 11 seconds per 512-pixel tile on a laptop CPU: around "
+                "AI Neural is experimental and slow: about 11 seconds per 512-pixel tile on a laptop CPU, around "
                 "2 minutes for this preview, and longer again for a full-size export.")
         else:
             self.deblur_status.setText("Lengths are in pixels of the full-size photo.")
