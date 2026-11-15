@@ -435,6 +435,17 @@ class Segmenter:
             mask = np.maximum(mask, build(face))
         return MaskResult(mask, "face mesh", None if mask.max() > 0 else f"no {kind} is visible")
 
+    def face(self, rgb: np.ndarray) -> MaskResult:
+        """Every face, forehead to chin, with a soft edge. For effects that
+        should touch faces and nothing behind them, such as de-blurring."""
+        def build(face: FaceRegions) -> np.ndarray:
+            oval = _fill(rgb.shape, [face.outline(fm.FACE_OVAL)])
+            grow = max(3, int(round(face.eye_span * 0.15)))
+            oval = cv2.dilate(oval, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * grow + 1, 2 * grow + 1)))
+            return feather(oval, grow * 0.6)
+
+        return self._per_face(rgb, "face", build)
+
     def hair(self, rgb: np.ndarray) -> MaskResult:
         faces = self.faces(rgb)
         if not faces:

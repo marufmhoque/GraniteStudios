@@ -99,22 +99,29 @@ class ExportWorkspace(Workspace):
         kept = [p for p in chosen if str(p) not in self.rejected]
         rejected = len(chosen) - len(kept)
         edited = sum(1 for p in kept if self.session.has_edits(p))
+        copies = sum(self.session.version_count(p) - 1 for p in kept)
+        versions = ""
+        if copies:
+            versions = (f" Those frames carry {copies} extra version(s); "
+                        + ("each is exported as its own file."
+                           if self.every_version.isChecked() else "only the active version of each is exported."))
         self.files_count.setText(
             f"{len(kept)} selected frame(s) will be exported, {edited} of them edited"
             + (f"; {rejected} rejected frame(s) left out" if rejected else "")
-            + ". Unedited frames export as shot."
+            + ". Unedited frames export as shot." + versions
         )
         noun = "image" if len(self.web_selected) == 1 else "images"
         self.web_selection_status.setText(f"{len(self.web_selected)} {noun} marked for web.")
 
     # -- rendering edited frames --------------------------------------------- #
 
-    def _job(self, path) -> FrameJob:
-        """How to render one frame: its recipe, plus what its layers need."""
+    def _job(self, path, version: int | None = None) -> FrameJob:
+        """How to render one frame: a version's recipe (the active one by
+        default), plus what its layers need."""
         from src.ai_tools import retouch
 
         path = Path(path)
-        recipe = self.session.recipe(path)
+        recipe = self.session.recipe(path, version)
         context = None
         if recipe.layers:
             if self._segmenter is None:
@@ -128,7 +135,16 @@ class ExportWorkspace(Workspace):
             )
         needs_fill = recipe.geometry.fill_blank and not recipe.geometry.constrain_to_image
         inpainter = retouch.Inpainter(download=False) if needs_fill and retouch.Inpainter.is_cached() else None
-        return FrameJob(path, recipe, context, inpainter, self.metadata.get(str(path)))
+        variant = ""
+        if version is not None:
+            variant = export_presets.version_tag(version, self.session.version_name(path, version))
+        return FrameJob(path, recipe, context, inpainter, self.metadata.get(str(path)), variant)
+
+    def _jobs(self, paths) -> list[FrameJob]:
+        """One job per frame, or per version of each frame when asked."""
+        if not self.every_version.isChecked():
+            return [self._job(path) for path in paths]
+        return [self._job(path, v.id) for path in paths for v in self.session.versions(path)]
 
     def _publishable(self, paths) -> list[Path]:
         """The images the publishing tools should read.
@@ -179,6 +195,14 @@ class ExportWorkspace(Workspace):
         row.addWidget(self.watermark_name, stretch=1)
         layout.addLayout(row)
 
+        self.every_version = QCheckBox("Export every version of each frame")
+        self.every_version.setChecked(True)
+        self.every_version.setToolTip(
+            "A frame with copies (Master, Copy 1, Cinematic…) is written once per version, "
+            "with the version's name added to the file name. Untick to export only the active version.")
+        self.every_version.toggled.connect(lambda _checked: self._refresh_counts())
+        layout.addWidget(self.every_version)
+
         bg_row = QHBoxLayout()
         self.remove_bg_button = QPushButton("Remove Background → PNG")
         self.remove_bg_button.setObjectName("SecondaryButton")
@@ -211,15 +235,15 @@ class ExportWorkspace(Workspace):
             QMessageBox.information(self, "Watermark", "Type the name to put on the watermark.")
             return
         self.session.save_recipes()
-        jobs = [self._job(path) for path in targets]
-        self.status_label.setText(f"Exporting {len(jobs)} frame(s) as {preset.name}…")
+        jobs = self._jobs(targets)
+        self.status_label.setText(f"Exporting {len(jobs)} image(s) from {len(targets)} frame(s) as {preset.name}…")
 
         def work():
             return export_presets.export_batch(jobs, out_dir, preset, watermark)
 
         def done(outcome):
             written, failures = outcome
-            message = f"Exported {len(written)} frame(s) to {out_dir}."
+            message = f"Exported {len(written)} image(s) to {out_dir}."
             if failures:
                 message += f" {len(failures)} could not be read: " + ", ".join(p.name for p, _ in failures[:5])
             self.status_label.setText(message + " Originals untouched.")

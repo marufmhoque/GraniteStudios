@@ -128,6 +128,7 @@ class ThumbnailCell(QLabel):
     clicked = pyqtSignal(str)
     opened = pyqtSignal(str)                # double-click: open in Develop
     web_toggled = pyqtSignal(str, bool)
+    menu_requested = pyqtSignal(str, object)    # right-click: path, global position
 
     def __init__(self, path: str, parent=None):
         super().__init__(parent)
@@ -192,6 +193,17 @@ class ThumbnailCell(QLabel):
             "background: rgba(10,11,14,0.80); border-radius: 6px; padding: 1px 6px; font-size: 11px;"
         )
         self.marks_tag.hide()
+        # Under the category label: how many versions the photo has, and
+        # which one is active ("v2/3"). Hidden while there is only the master.
+        self.version_tag = QLabel(self)
+        self.version_tag.setGeometry(w - 66, 30, 60, 20)
+        self.version_tag.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.version_tag.setStyleSheet(
+            "background: rgba(10,11,14,0.85); color: #ffffff; border: 1px solid #E31B23;"
+            " border-radius: 6px; padding: 1px 4px; font-size: 10px; font-weight: 700;"
+        )
+        self.version_tag.hide()
+        self.version_count = 1
         # Under the star badge: what the blur analysis decided.
         self.blur_tag = QLabel(self)
         self.blur_tag.setGeometry(6, 30, 140, 20)
@@ -220,9 +232,25 @@ class ThumbnailCell(QLabel):
         self.tech_label.hide()
 
     def _raise_overlays(self) -> None:
-        for overlay in (self.badge_label, self.label_tag, self.tech_label,
+        for overlay in (self.badge_label, self.label_tag, self.tech_label, self.version_tag,
                         self.web_checkbox, self.reject_tag, self.blur_tag, self.marks_tag):
             overlay.raise_()
+
+    def set_versions(self, names: list[str], active_index: int) -> None:
+        """Show the version badge: ``v2/3`` is the second of three versions."""
+        self.version_count = len(names)
+        if len(names) < 2:
+            self.version_tag.hide()
+            return
+        self.version_tag.setText(f"v{active_index + 1}/{len(names)}")
+        self.version_tag.setToolTip("Versions: " + ", ".join(
+            f"{n} (shown)" if i == active_index else n for i, n in enumerate(names)))
+        self.version_tag.show()
+        self.version_tag.raise_()
+
+    def contextMenuEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        self.menu_requested.emit(self.path, event.globalPos())
+        event.accept()
 
     def set_web_selected(self, checked: bool) -> None:
         """Set the web checkbox without re-emitting web_toggled (for syncing

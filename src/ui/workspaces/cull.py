@@ -8,6 +8,10 @@ Keyboard, with the grid focused:
     U           clear pick and reject           Enter   open in Develop
     S           survey the selection side by side
     F           face loupe for the selection
+    Ctrl+'      create a version (virtual copy) of each target frame
+
+Right-click a thumbnail for its versions: make a copy, make the three style
+versions, or choose which version is shown and edited.
 
 Ratings, labels and picks apply to the selection, or to the current frame
 when nothing is selected. Every action that used to write a straightened,
@@ -24,7 +28,7 @@ import cv2
 import numpy as np
 from PIL import Image
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize, QPropertyAnimation, QEasingCurve
-from PyQt6.QtGui import QPixmap, QImage, QFont, QIcon, QColor
+from PyQt6.QtGui import QPixmap, QImage, QFont, QIcon, QColor, QCursor
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -39,6 +43,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QProgressBar,
     QPushButton,
@@ -104,7 +109,7 @@ class CullWorkspace(Workspace):
     def on_session(self, topic: str) -> None:
         if topic == session_topics.LIBRARY:
             self._rebuild_grid()
-        elif topic in (session_topics.MARKS, session_topics.RECIPE):
+        elif topic in (session_topics.MARKS, session_topics.RECIPE, session_topics.VERSIONS):
             self._refresh_marks()
         elif topic == session_topics.CURRENT:
             self._show_current()
@@ -130,6 +135,9 @@ class CullWorkspace(Workspace):
             )
             cell.set_web_selected(key in self.web_selected)
             cell.set_label(self.labels.get(key, ""))
+            versions = self.session.versions(key)
+            active = self.session.active_version(key)
+            cell.set_versions([v.name for v in versions], [v.id for v in versions].index(active))
         self._refresh_reject_button()
         self._apply_view_filter()
 
@@ -179,6 +187,8 @@ class CullWorkspace(Workspace):
             self._toggle_survey()
         elif key == Qt.Key.Key_F:
             self._on_face_loupe()
+        elif key == Qt.Key.Key_Apostrophe and event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            self.create_versions(targets)
         elif key == Qt.Key.Key_Escape and self.view_stack.currentIndex():
             self.view_stack.setCurrentIndex(0)
         else:
@@ -687,6 +697,17 @@ class CullWorkspace(Workspace):
         self.forget_button.setToolTip("Delete everything stored about faces for this folder")
         self.forget_button.clicked.connect(self._on_forget_people)
         view_row.addWidget(self.forget_button)
+        self.versions_button = QPushButton("Versions ▾")
+        self.versions_button.setObjectName("SecondaryButton")
+        self.versions_button.setToolTip(
+            "Virtual copies: extra edits of the same photo that share its pixels. "
+            "Applies to the selection, or the current frame.")
+        versions_menu = QMenu(self.versions_button)
+        versions_menu.addAction("Create Version  (Ctrl+')", lambda: self.create_versions(self._mark_targets()))
+        versions_menu.addAction("Create 3 Style Versions (" + ", ".join(pr.VERSION_STYLES).replace("&", "&&") + ")",
+                                lambda: self.create_style_versions(self._mark_targets()))
+        self.versions_button.setMenu(versions_menu)
+        view_row.addWidget(self.versions_button)
         view_row.addSpacing(12)
         view_row.addWidget(keys)
         view_row.addStretch()
@@ -735,6 +756,52 @@ class CullWorkspace(Workspace):
         self.session.set_current(path)
         self.session.notify(session_topics.SELECTION)
         self._refresh_status()
+
+    # -- versions ------------------------------------------------------------------ #
+
+    def create_versions(self, keys) -> list[int]:
+        """Branch one copy of each frame's active version."""
+        made = [self.session.create_version(key) for key in keys]
+        if made:
+            self.session.save_all()
+            self.status_label.setText(
+                f"Made a new version of {len(made)} frame(s). Only the edit settings were copied; "
+                "every version renders from the same original.")
+        return made
+
+    def create_style_versions(self, keys) -> int:
+        """Cinematic, Warm Analog and Clean B&W for each frame, from its master."""
+        for key in keys:
+            self.session.create_style_versions(key)
+        if keys:
+            self.session.save_all()
+            self.status_label.setText(
+                f"Made {len(pr.VERSION_STYLES)} style versions of {len(keys)} frame(s): "
+                + ", ".join(pr.VERSION_STYLES) + ". Open one in Develop to fine-tune it.")
+        return len(keys) * len(pr.VERSION_STYLES)
+
+    def _on_cell_menu(self, key: str, where) -> None:
+        self.session.set_current(key)
+        menu = self.version_menu(key)
+        menu.exec(where if where is not None else QCursor.pos())
+
+    def version_menu(self, key: str) -> QMenu:
+        """The right-click menu of one thumbnail."""
+        menu = QMenu(self)
+        menu.addAction("Open in Develop", lambda: self.shell.open_in_develop(key))
+        menu.addSeparator()
+        menu.addAction("Create Version", lambda: self.create_versions([key]))
+        menu.addAction("Create 3 Style Versions", lambda: self.create_style_versions([key]))
+        versions = self.session.versions(key)
+        if len(versions) > 1:
+            show = menu.addMenu("Show Version")
+            active = self.session.active_version(key)
+            for version in versions:
+                action = show.addAction(version.name.replace("&", "&&"),
+                                        lambda v=version.id: self.session.set_active_version(key, v))
+                action.setCheckable(True)
+                action.setChecked(version.id == active)
+        return menu
 
     def _pose_analyzer(self, download_ok: bool = False):
         """The pose analyzer, or None when the body engine is off or absent.
@@ -1235,6 +1302,7 @@ class CullWorkspace(Workspace):
             cell.clicked.connect(self._on_thumb_clicked)
             cell.opened.connect(self.shell.open_in_develop)
             cell.web_toggled.connect(self._on_web_toggle)
+            cell.menu_requested.connect(self._on_cell_menu)
             self.grid.addWidget(cell, i // columns, i % columns)
             self.cells[str(path)] = cell
         self._refresh_marks()

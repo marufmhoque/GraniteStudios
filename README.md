@@ -23,6 +23,7 @@ Six workspaces over one folder: **Cull**, **Develop**, **Retouch**, **Design**, 
 - 🖌️ **Retouch**: layers with seven blend modes, AI masks (subject, skin, teeth, eyes, sky…), healing, cloning, skin smoothing that keeps pores, and inpainting that fills straightened corners
 - ✍️ **Design**: vector text, shapes and watermarks that print sharp at any size and export to SVG and PDF
 - 💾 **Non-destructive**: every edit is a small settings file. Nothing is rendered until you export, and your originals are never modified, moved or deleted
+- 🔀 **Versions (virtual copies)**: branch any photo into several independent edits (a moody black-and-white and a warm colour grade of the same frame) without copying a single pixel, compare them side by side, and export each
 
 ## Granite Studios at a glance
 
@@ -47,6 +48,8 @@ Six workspaces over one folder: **Cull**, **Develop**, **Retouch**, **Design**, 
 | Input | ten camera RAW formats, phone DNG, 10-bit HEIC, Ultra HDR, Motion and Live Photos, JPEG, PNG, TIFF, MP4/MOV/MKV/WebM/ProRes/DNxHD |
 | Cull | Sharpness on the faces, blink and smile from a 478-point mesh, duplicate and burst grouping, cull to a target count, survey and face loupe, group by person, ratings and labels written to `.xmp` |
 | Develop | 32-bit float engine: tone, curves, 8-band HSL, colour grading, dehaze, lens profiles, `.cube` LUTs, straighten, keystone, copy and sync settings, clipping view |
+| De-blur | True deconvolution of motion smear and missed focus (Richardson-Lucy, Wiener, optional NAFNet), auto-detected angle and length, subject- or face-only |
+| Versions | Virtual copies of any photo: independent edits that share the original's pixels, one-click Cinematic / Warm Analog / Clean B&W branches, side-by-side compare, every version exported as its own file |
 | Retouch | Layers (7 blend modes), AI masks (subject, skin, teeth, eyes, iris, lips; hair and sky approximate), click-to-select, healing, cloning, frequency-separation skin smoothing, teeth and eyes, neural inpainting |
 | Design | Vector text, shapes and bezier paths; watermark templates filled from each photo's EXIF; snapping and guides; SVG and PDF output |
 | Export | Web, full-size, 16-bit TIFF, print and 16-bit PNG presets; Instagram sets; panoramic reel; static web gallery; transparent-background PNG |
@@ -71,12 +74,14 @@ Six workspaces over one folder: **Cull**, **Develop**, **Retouch**, **Design**, 
 - Develop slider moves render in about **15 ms** from a 1,600 px proxy, using the same pipeline as export
 - Straightening: under **1 degree** residual from scene lines, **0.6 degree** mean from the body when there are no lines
 - Background removal **1.36 times faster** on DirectML than CPU
-- **493 automated tests** against real engines, 18,500 lines of application code and 4,700 lines of tests
+- De-blurring recovers **+5.2 dB** on a synthetic 10 px motion smear; a full-quality pass takes about **4 s** on the 1,600 px preview and **66 s** on a 24 MP export (a fast Wiener pass follows the slider in about 150 ms)
+- **570 automated tests** against real engines, 20,300 lines of application code and 5,600 lines of tests
 
 **What it cannot do yet** (full list with reasons in [PRD.md](PRD.md) section 8):
 
 - Blink and smile detection is checked on four reference faces, not on a labelled set of real blinks. Treat it as a strong filter, not a verdict
 - Hair and sky masks and neural-fill quality are unjudged on real work
+- De-blur is measured on synthetic blur only and assumes one blur for the whole frame; the optional AI de-blur model is slow (about 2 minutes for a preview on a laptop CPU) and gains only 1–2 dB on a photograph
 - Apple ProRAW tone-map tables are detected but not applied
 - macOS builds but has not been run by the author; the hosted browser build is not deployed
 - No client proofing, favourites, print ordering or trained "AI profile" from a Lightroom catalogue; those need hosted services
@@ -86,8 +91,8 @@ Six workspaces over one folder: **Cull**, **Develop**, **Retouch**, **Design**, 
 | Where | Keys |
 | --- | --- |
 | Anywhere | **Ctrl+1 to Ctrl+6** switch workspace |
-| Cull | Arrows move; **1-5** stars (0 clears); **6-9** red, yellow, green, blue; **P** pick; **X** reject; **U** clear; **S** survey; **F** face loupe; **Enter** open in Develop |
-| Develop | Left/Right change frame; **\\** before/after; **J** clipping; **Ctrl+Z / Ctrl+Y** undo, redo; **Ctrl+Shift+C / V** copy, paste settings; **0** fit; **1** 100% |
+| Cull | Arrows move; **1-5** stars (0 clears); **6-9** red, yellow, green, blue; **P** pick; **X** reject; **U** clear; **S** survey; **F** face loupe; **Ctrl+'** new version; **Enter** open in Develop |
+| Develop | Left/Right change frame; **[ / ]** change version; **V** compare versions (**Shift+V** picks which); **\\** before/after; **J** clipping; **Ctrl+Z / Ctrl+Y** undo, redo; **Ctrl+Shift+C / V** copy, paste settings; **0** fit; **1** 100% |
 
 **Where to go next:** [Quick Start](#quick-start) to install, [Features](#features) for every control, [Architecture Highlights](#architecture-highlights) for how edits are stored, and [PRD.md](PRD.md) for every requirement with its evidence.
 
@@ -231,10 +236,27 @@ filmstrip along the bottom.
 - **Tone curve** for the whole image and per channel, drawn over the histogram
 - **Colour**: eight-band HSL (hue, saturation, luminance), three-way colour grading (shadows, midtones, highlights) with balance and blending
 - **Looks and LUTs**: the six original grades as adjustable looks, and any 3D `.cube` LUT, each with a strength slider
-- **Detail**: sharpening and noise reduction. **Lens**: automatic distortion, colour-fringe and vignetting correction from the lens database when the camera and lens are known, manual sliders when not
+- **Detail**: sharpening and noise reduction, and **De-Blur** (below). **Lens**: automatic distortion, colour-fringe and vignetting correction from the lens database when the camera and lens are known, manual sliders when not
 - **Crop and straighten**: quarter turns, flip, straighten, vertical and horizontal keystone, aspect crops
 - **Before / After (\\)**, **clipping view (J)** showing lost shadows in blue and blown highlights in red, a live RGB histogram, **undo and redo** (Ctrl+Z / Ctrl+Y), **copy and paste settings**, and **Sync** to copy the settings to every selected frame (crops and retouching stay with their own photo)
 - RAW files develop from 16-bit linear sensor data in 32-bit float. Highlights roll off rather than clip when exposure is pushed
+
+### De-Blur
+Sharpening lifts edges that survived. **De-Blur** (Develop ▸ Detail) undoes the blur itself by *deconvolution*: it models the smear or the missed focus as a point spread function and solves for the sharp scene that produced the photo.
+- **Auto-Detect from Analysis** reads the smear's direction from the blur analysis and its length from the image's cepstrum (or, for missed focus, the blur's radius), in pixels of the full-size photo
+- **Mode**: *Motion* (Angle 0–180°, Smear Length 1–30 px), *Defocus* (Radius 1–20 px), or *AI Neural*, a 92 MB NAFNet model that needs no settings (downloaded only if you agree). It is slow, about 2 minutes for the preview on a laptop CPU, and its gain is modest: 1–2 dB on a smeared photograph, against 5 dB for Motion mode given the right blur
+- **Suppression** (Artifact Suppression, 0–1) holds back ringing and noise; raise it on noisy, high-ISO frames
+- **Apply to**: the whole frame, the subject only, or faces only, so a clean background is not filled with amplified noise
+- While you drag a slider a fast Wiener filter follows it (about 150 ms on a laptop); when you let go, damped Richardson-Lucy renders the full-quality result (about 4 s). It runs in linear light, before lens correction and tone, exactly as the export does
+- It recovers detail the blur weakened, not detail it erased. Long smears, a wrong angle and blur that differs across the frame (a moving subject against a still background) limit it. It stays with its own photo when you copy, paste or sync settings
+
+### Versions (virtual copies)
+- **Branch a photo into several edits.** A version is a second set of settings for the same original: making one copies only the small settings file, never the pixels. Edit *Copy 1* as a high-contrast black and white and the *Master* as a warm colour grade; neither touches the other
+- **The version bar** sits above the picture in Develop, Retouch and Design: a pill per version (`Master`, `Copy 1`, `Moody Edit`…). Click one to switch to it; nothing is lost when you do. **+ Version** branches the one you are looking at; **⋯** (or right-click a pill) renames or removes it
+- **+ 3 Styles** branches *Cinematic*, *Warm Analog* and *Clean B&W* from the master in one click, keeping its crop, lens corrections, retouching and watermark. In Cull, the **Versions ▾** menu or a right-click does the same for a whole selection, and **Ctrl+'** makes a copy
+- **Compare (V)** puts another version beside the one you are editing, zoom and pan locked together; **Shift+V** steps through the others, **[** and **]** switch which one you edit
+- The **grid badge** `v2/3` says a photo has three versions and the second is showing
+- **Export** writes every version as its own file (`IMG_1_v2-moody-edit.jpg`), or only the active one if you untick *Export every version*. Ratings, labels and rejection belong to the photo, so a rejected photo exports no versions
 
 ### Retouch
 - **Layers** with opacity and seven blend modes (normal, multiply, screen, overlay, soft light, colour dodge, luminosity), shown in a panel you can reorder and hide
@@ -355,7 +377,7 @@ python tests/fetch_media.py   # optional: CC0 camera RAW samples and reference f
 pytest
 ```
 
-**493 tests.** They drive the real engines and the real window (headless,
+**570 tests.** They drive the real engines and the real window (headless,
 with `QT_QPA_PLATFORM=offscreen`); nothing is mocked except file dialogs.
 Tests that need a downloaded model or sample file are marked `model` or
 `media` and skip themselves when it is absent.
@@ -395,8 +417,9 @@ Vacation2024/                       # your originals — never modified or moved
 ├── DSC_0001.NEF
 ├── DSC_0002.NEF
 └── Vacation2024-edit/              # created on load
-    ├── DSC_0001.NEF.granite.json   # this photo's edit recipe
-    ├── session.granite.json        # ratings, labels, picks, rejects
+    ├── DSC_0001.NEF.granite.json   # this photo's edit recipe (the master version)
+    ├── DSC_0001.NEF.granite-v1.json  # a second version ("Copy 1"), settings only
+    ├── session.granite.json        # ratings, labels, picks, rejects, version names
     ├── people.granite.json         # who appears where (if you grouped by person)
     └── DSC_0002_nobg.png           # background removal output
 ```
@@ -487,11 +510,13 @@ nothing here reads as a promise the code does not keep.
 | Requirement | Status |
 | --- | --- |
 | Parametric RAW develop (tone, curves, HSL, grading, dehaze, lens, LUTs, geometry) | **Done** |
+| Versions / virtual copies, with one-click style branches | **Done** |
 | Layers, blend modes, masks | **Done** |
 | Subject, skin, teeth, eyes masks | **Done** |
 | Hair and sky masks | **Partial** — work, but unmeasured; offered as a starting point |
 | Skin smoothing, healing, cloning, teeth, eyes | **Done** |
 | Inpainting and corner fill | **Done** — fast fill always; neural fill with a 93 MB model. Quality not yet judged on real prints |
+| True de-blur (motion and defocus deconvolution) | **Done** on synthetic blur; the optional neural engine runs, but slowly (136 s for a preview on a laptop CPU) |
 | Vector text, shapes, watermarks, SVG and PDF | **Done** |
 | ProRAW local tone mapping | **Not built** — detected and reported, not applied |
 | AI profiles trained from a photographer's Lightroom catalogue | **Not built** — a training pipeline, the largest item in the spec |

@@ -6,11 +6,18 @@ Keyboard, with the picture focused:
     J              show clipped shadows and highlights
     Ctrl+Z / Y     undo / redo                 Ctrl+Shift+C / V   copy / paste settings
     0              fit to window               1          100 percent
+    [ / ]          previous / next version     V          compare versions side by side
+    Shift+V        compare with a different version
 
 Every control edits the frame's recipe. The preview is rendered on a
 background thread from a proxy of the frame, with the same pipeline the
 export uses, so what is seen is what will be written. The recipe is saved to
 its sidecar when the frame changes or the workspace is left.
+
+A photograph can have several versions (see the version bar above the
+picture). Develop edits whichever is active, and always writes back to the
+version it opened, so switching never lands one version's settings on
+another.
 """
 
 from __future__ import annotations
@@ -29,10 +36,11 @@ from src.engine import develop_pipeline as dp
 from src.engine import layer_stack
 from src.engine import parametric_recipe as pr
 from src.engine import session as topics
-from src.ui.widgets.canvas import ImageCanvas
+from src.ui.widgets.canvas import ImageCanvas, link_views
 from src.ui.widgets.controls import CurveEditor, Histogram, Section, SliderRow, clipping_overlay
 from src.ui.widgets.filmstrip import Filmstrip
 from src.ui.widgets.renderer import LatestOnlyRenderer
+from src.ui.widgets.versions import VersionBar
 from src.ui.workspaces.base import Workspace
 
 logger = logging.getLogger(__name__)
@@ -76,6 +84,11 @@ class DevelopWorkspace(Workspace):
     def __init__(self, shell) -> None:
         super().__init__(shell)
         self.key: str | None = None
+        self.version = pr.MASTER            # the version of ``key`` being edited
+        self._sibling: int | None = None    # the version shown beside it when comparing
+        self._sibling_key: str | None = None
+        self._comparing_versions = False
+        self._dragging_deblur = False       # a de-blur slider is held: preview with Wiener
         self.source: dp.Source | None = None
         self.recipe = pr.Recipe()
         self._history: list[dict] = []
@@ -117,12 +130,32 @@ class DevelopWorkspace(Workspace):
         self.clip_button = self._button("Clipping  J", self._toggle_clipping, "Show lost shadows (blue) and highlights (red) (J)")
         self.clip_button.setCheckable(True)
         bar.addWidget(self.compare_button)
+        self.versions_button = self._button("Versions  V", self._toggle_versions,
+                                            "Show another version of this photo side by side (V; Shift+V picks which)")
+        self.versions_button.setCheckable(True)
+        bar.addWidget(self.versions_button)
         bar.addWidget(self.clip_button)
         bar.addWidget(self._button("Fit", lambda: self.canvas.fit(), "Fit the frame to the window (0)"))
         bar.addWidget(self._button("100%", lambda: self.canvas.actual_size(), "One image pixel per screen pixel (1)"))
         centre.addLayout(bar)
+        self.version_bar = VersionBar(self.session, self._commit)
+        centre.addWidget(self.version_bar)
+        views = QHBoxLayout()
+        views.setSpacing(8)
         self.canvas = ImageCanvas()
-        centre.addWidget(self.canvas, stretch=1)
+        self.sibling_canvas = ImageCanvas()
+        link_views([self.canvas, self.sibling_canvas])
+        self.main_caption, self.sibling_caption = QLabel(), QLabel()
+        for caption_label, view in ((self.main_caption, self.canvas), (self.sibling_caption, self.sibling_canvas)):
+            column = QVBoxLayout()
+            column.setSpacing(4)
+            caption_label.setStyleSheet("color: #c9cad0; font-size: 12px; font-weight: 600;")
+            caption_label.setVisible(False)
+            column.addWidget(caption_label)
+            column.addWidget(view, stretch=1)
+            views.addLayout(column, stretch=1)
+        self.sibling_canvas.setVisible(False)
+        centre.addLayout(views, stretch=1)
         self.filmstrip = Filmstrip(self.session, self.shell.thumbnail_for)
         centre.addWidget(self.filmstrip)
         outer.addLayout(centre, stretch=1)
@@ -226,6 +259,7 @@ class DevelopWorkspace(Workspace):
         self._slider(detail, ("detail", "sharpen_amount"), "Sharpen", 0, 150, 0.0)
         self._slider(detail, ("detail", "sharpen_radius"), "Radius", 0.5, 3.0, 1.0, 0.1, 1)
         self._slider(detail, ("detail", "noise_reduction"), "Noise", 0, 100, 0.0)
+        detail.add(self._build_deblur())
         self.panel.addWidget(detail)
 
         lens = Section("Lens", expanded=False)
@@ -261,6 +295,49 @@ class DevelopWorkspace(Workspace):
         self.panel.addWidget(geometry)
         self.panel.addStretch()
 
+    def _build_deblur(self) -> Section:
+        """De-Blur: true deconvolution of motion smear or missed focus."""
+        group = Section("De-Blur", expanded=False)
+        self.deblur_enable = QCheckBox("Enable De-Blur")
+        self.deblur_enable.setToolTip(
+            "Undo motion smear or missed focus by deconvolution. This recovers detail the "
+            "blur weakened; it cannot invent detail the blur erased.")
+        self.deblur_enable.toggled.connect(self._on_deblur_enable)
+        group.add(self.deblur_enable)
+        self.deblur_auto = self._button("Auto-Detect from Analysis", self._on_deblur_auto,
+                                        "Measure the smear's direction and length, or the focus blur's size")
+        group.add(self.deblur_auto)
+        self.deblur_mode = QComboBox()
+        for label, data in (("Motion", "motion"), ("Defocus", "defocus"), ("AI Neural", "neural")):
+            self.deblur_mode.addItem(label, data)
+        self.deblur_mode.setToolTip(
+            "Motion and Defocus deconvolve with the blur you describe below. AI Neural is a "
+            "trained model (92 MB download) that needs no settings but knows only motion blur. "
+            "It is slow: about 2 minutes for the preview on a laptop, far longer for an export.")
+        self.deblur_mode.currentIndexChanged.connect(self._on_deblur_mode)
+        group.add_row(QLabel("Mode"), self.deblur_mode)
+        self._slider(group, ("deblur", "angle"), "Angle", 0, 180, 0.0)
+        self._slider(group, ("deblur", "length"), "Smear Length", 1.0, 30.0, 5.0, 0.5, 1)
+        self._slider(group, ("deblur", "radius"), "Defocus Radius", 1.0, 20.0, 3.0, 0.5, 1)
+        self._slider(group, ("deblur", "damping"), "Suppression", 0.0, 1.0, 0.05, 0.01, 2).setToolTip(
+            "Artifact Suppression: hold back ringing and noise. Raise it on noisy, high-ISO frames.")
+        for key in (("deblur", "angle"), ("deblur", "length"), ("deblur", "radius"), ("deblur", "damping")):
+            row = self.sliders[key]
+            row.released.disconnect()
+            row.released.connect(self._on_deblur_released)
+        self.deblur_area = QComboBox()
+        for label, data in (("Whole frame", "full"), ("Subject only", "subject_only"), ("Faces only", "face_only")):
+            self.deblur_area.addItem(label, data)
+        self.deblur_area.setToolTip("Limit de-blurring to the subject or to faces, so background noise "
+                                    "is not amplified")
+        self.deblur_area.currentIndexChanged.connect(self._on_deblur_area)
+        group.add_row(QLabel("Apply to"), self.deblur_area)
+        self.deblur_status = QLabel("Lengths are in pixels of the full-size photo.")
+        self.deblur_status.setObjectName("PageSubtitle")
+        self.deblur_status.setWordWrap(True)
+        group.add(self.deblur_status)
+        return group
+
     def _button(self, text, slot, tip="") -> QPushButton:
         button = QPushButton(text)
         button.setObjectName("SecondaryButton")
@@ -280,7 +357,8 @@ class DevelopWorkspace(Workspace):
 
     def on_enter(self) -> None:
         self.filmstrip.refresh()
-        if self.session.current != self.key:
+        if self.session.current != self.key or (
+                self.key is not None and self.session.active_version(self.key) != self.version):
             self.load(self.session.current)
         self.setFocus()
 
@@ -290,18 +368,57 @@ class DevelopWorkspace(Workspace):
     def on_session(self, topic: str) -> None:
         if topic == topics.LIBRARY:
             self.key, self.source = None, None
+            self._toggle_versions(False)
             self.canvas.set_image(None)
             self.filmstrip.rebuild()
         elif topic in (topics.CURRENT, topics.MARKS):
             self.filmstrip.refresh()
             if topic == topics.CURRENT and self.shell.__dict__.get("_current_index") is not None and self.shell.current_workspace is self and self.session.current != self.key:
                 self.load(self.session.current)
+        elif topic == topics.VERSIONS and self.key is not None:
+            if self.session.active_version(self.key) != self.version and self._is_shown():
+                self.switch_version()
+            elif self._comparing_versions and self.session.version_count(self.key) < 2:
+                self._toggle_versions(False)
+                self._show_names()
+            else:
+                if self._comparing_versions:
+                    self._pick_sibling()
+                    self._render()
+                self._show_names()
+
+    def _is_shown(self) -> bool:
+        return self.shell.__dict__.get("_current_index") is not None and self.shell.current_workspace is self
+
+    def switch_version(self) -> None:
+        """Show the active version of the open frame, without decoding it again."""
+        self.session.save_recipes()
+        self.version = self.session.active_version(self.key)
+        self.recipe = self.session.recipe(self.key, self.version).copy()
+        self._history, self._future = [], []
+        self._before_key, self._sibling_key, self._layer_context = None, None, None
+        self._load_controls()
+        self._show_names()
+        if self._comparing_versions:
+            self._pick_sibling()
+        self._render()
+
+    def _show_names(self) -> None:
+        if self.key is None:
+            return
+        self.frame_label.setText(self.session.display_name(self.key, self.version)
+                                 + ("   (rejected)" if self.key in self.rejected else ""))
+        self.main_caption.setText(self.session.version_name(self.key, self.version) + "  (editing)")
+        if self._sibling is not None and self._sibling in {v.id for v in self.session.versions(self.key)}:
+            self.sibling_caption.setText(self.session.version_name(self.key, self._sibling))
 
     def load(self, key: str | None) -> None:
         """Open a frame. The decode runs in the background."""
         self.session.save_recipes()
         self.renderer.cancel()
         self.key = key
+        self.version_bar.set_photo(key)
+        self._sibling, self._sibling_key = None, None
         self._history, self._future = [], []
         self._before_key = None
         self._layer_context = None
@@ -310,9 +427,12 @@ class DevelopWorkspace(Workspace):
             self.canvas.set_image(None)
             self.frame_label.setText("No photo open")
             return
-        self.recipe = self.session.recipe(key).copy()
+        self.version = self.session.active_version(key)
+        self.recipe = self.session.recipe(key, self.version).copy()
         self._load_controls()
-        self.frame_label.setText(Path(key).name + ("   (rejected)" if key in self.rejected else ""))
+        if self._comparing_versions:
+            self._pick_sibling()
+        self._show_names()
         self.canvas.caption = "Loading…"
         self._loading = True
         path = Path(key)
@@ -346,8 +466,8 @@ class DevelopWorkspace(Workspace):
 
     # -- rendering ------------------------------------------------------------- #
 
-    def _context(self):
-        if not self.recipe.layers:
+    def _context(self, recipe: pr.Recipe | None = None):
+        if not (recipe or self.recipe).layers:
             return None
         if self._layer_context is None:
             from src.ai_tools.segmentation import Segmenter
@@ -363,8 +483,20 @@ class DevelopWorkspace(Workspace):
         if self.source is None:
             return
         source, recipe, context = self.source, self.recipe.copy(), self._context()
+        if self._dragging_deblur and recipe.deblur.enabled and recipe.deblur.engine == "parametric":
+            # Richardson-Lucy takes seconds; the closed-form Wiener filter
+            # follows the slider, and the full engine runs on release.
+            recipe.deblur.engine = "wiener_fast"
         geometry_key = repr(pr.to_dict(recipe)["geometry"])
         want_before = self.canvas.comparing and geometry_key != self._before_key
+        sibling, sibling_key, sibling_context = None, None, None
+        if self._comparing_versions and self._sibling is not None:
+            sibling = self.session.recipe(self.key, self._sibling).copy()
+            sibling_key = f"{self._sibling}:{pr.dumps(sibling)}"
+            if sibling_key == self._sibling_key:
+                sibling = None              # already on screen
+            else:
+                sibling_context = self._context(sibling)
 
         def job():
             after = dp.render(source, recipe, layers=context)
@@ -373,12 +505,16 @@ class DevelopWorkspace(Workspace):
                 neutral = pr.Recipe()
                 neutral.geometry = recipe.geometry
                 before = dp.render(source, neutral)
-            return after, before, geometry_key
+            other = dp.render(source, sibling, layers=sibling_context) if sibling is not None else None
+            return after, before, geometry_key, other, sibling_key
 
         self.renderer.request(job)
 
     def _on_rendered(self, result) -> None:
-        after, before, geometry_key = result
+        after, before, geometry_key, other, sibling_key = result
+        if other is not None:
+            self.sibling_canvas.set_image(other)
+            self._sibling_key = sibling_key
         self._last_render = after
         self.histogram.set_image(after)
         self.curve.set_histogram(self.histogram.luminance_counts())
@@ -407,10 +543,30 @@ class DevelopWorkspace(Workspace):
         self.lens_profile.blockSignals(True)
         self.lens_profile.setChecked(self.recipe.lens.profile)
         self.lens_profile.blockSignals(False)
+        self._load_deblur()
         g = self.recipe.geometry
         self.corners_combo.blockSignals(True)
         self.corners_combo.setCurrentText("Crop" if g.constrain_to_image else ("Fill" if g.fill_blank else "Leave black"))
         self.corners_combo.blockSignals(False)
+
+    def _load_deblur(self) -> None:
+        d = self.recipe.deblur
+        for widget, value in ((self.deblur_enable, None), (self.deblur_mode, None), (self.deblur_area, None)):
+            widget.blockSignals(True)
+        self.deblur_enable.setChecked(d.enabled)
+        self.deblur_mode.setCurrentIndex(self.deblur_mode.findData("neural" if d.engine == "neural" else d.blur_type))
+        self.deblur_area.setCurrentIndex(max(0, self.deblur_area.findData(d.mask_mode)))
+        for widget in (self.deblur_enable, self.deblur_mode, self.deblur_area):
+            widget.blockSignals(False)
+        self._show_deblur_controls()
+
+    def _show_deblur_controls(self) -> None:
+        """Only the sliders the chosen mode uses are shown."""
+        mode = self.deblur_mode.currentData()
+        self.sliders[("deblur", "angle")].setVisible(mode == "motion")
+        self.sliders[("deblur", "length")].setVisible(mode == "motion")
+        self.sliders[("deblur", "radius")].setVisible(mode == "defocus")
+        self.sliders[("deblur", "damping")].setVisible(mode != "neural")
 
     def _load_curve(self) -> None:
         self.curve.set_points(getattr(self.recipe.curve, self.curve_channel.currentText()))
@@ -433,18 +589,128 @@ class DevelopWorkspace(Workspace):
         """A change is finished: record it for undo and hand it to the session."""
         if self.key is None:
             return
-        snapshot = pr.to_dict(self.session.recipe(self.key))
+        snapshot = pr.to_dict(self.session.recipe(self.key, self.version))
         if snapshot != pr.to_dict(self.recipe):
             self._history.append(snapshot)
             del self._history[:-HISTORY_LIMIT]
             self._future.clear()
-            self.session.set_recipe(self.key, self.recipe.copy())
+            self.session.set_recipe(self.key, self.recipe.copy(), self.version)
 
     def _on_value(self, key, value: float) -> None:
         section, attr = key
+        self._dragging_deblur = section == "deblur"
         setattr(self._section(section), attr, pr.clamp(_range_name(section, attr), value)
                 if _range_name(section, attr) else value)
         self._changed()
+
+    # -- de-blur ------------------------------------------------------------- #
+
+    def _on_deblur_released(self) -> None:
+        self._dragging_deblur = False
+        self._commit()
+        if self.recipe.deblur.enabled:
+            self.status_label.setText("De-blurring at full quality…")
+            self._render()
+
+    def _deblur_models(self) -> list:
+        """Models the current de-blur settings need that may be missing."""
+        from src.ai_tools import deblur, face_mesh
+        from src.ai_tools.face_analysis import MODEL_SPEC as YUNET_SPEC
+        from src.ai_tools.segmentation import Segmenter
+
+        d = self.recipe.deblur
+        specs = [deblur.NAFNET_SPEC] if d.engine == "neural" else []
+        if d.mask_mode == "subject_only":
+            specs += list(Segmenter.models_for("subject"))
+        elif d.mask_mode == "face_only":
+            specs += [YUNET_SPEC, face_mesh.MESH_SPEC]
+        return specs
+
+    def _apply_deblur(self, purpose: str) -> None:
+        """Render once any model the settings need is here (asking first)."""
+        def go() -> None:
+            self._changed()
+            self._commit()
+
+        specs = self._deblur_models()
+        if specs and self.recipe.deblur.enabled:
+            self.shell.with_models(specs, purpose, go, self.deblur_auto)
+        else:
+            go()
+
+    def _on_deblur_enable(self, checked: bool) -> None:
+        self.recipe.deblur.enabled = checked
+        self._apply_deblur("De-blurring")
+
+    def _on_deblur_mode(self, _index: int) -> None:
+        mode = self.deblur_mode.currentData()
+        d = self.recipe.deblur
+        if mode == "neural":
+            d.engine = "neural"
+        else:
+            d.blur_type = mode
+            d.engine = "wiener_fast" if d.engine == "wiener_fast" else "parametric"
+        self._show_deblur_controls()
+        if mode == "neural":
+            self.deblur_status.setText(
+                "AI Neural takes about 11 seconds per 512-pixel tile on a laptop CPU: around "
+                "2 minutes for this preview, and longer again for a full-size export.")
+        else:
+            self.deblur_status.setText("Lengths are in pixels of the full-size photo.")
+        self._apply_deblur("AI de-blurring" if mode == "neural" else "De-blurring")
+
+    def _on_deblur_area(self, _index: int) -> None:
+        self.recipe.deblur.mask_mode = self.deblur_area.currentData()
+        self._apply_deblur("Limiting de-blur to the subject or faces")
+
+    def _on_deblur_auto(self) -> None:
+        """Fill in the blur from the frame itself: direction and length of a
+        smear, or the size of a focus blur."""
+        import cv2
+
+        from src.ai_tools import blur_analysis, deblur
+
+        if self.source is None:
+            return
+        encoded = np.round(dp.srgb_encode(self.source.to_linear()) * 255.0).astype(np.uint8)
+        bgr = cv2.cvtColor(encoded, cv2.COLOR_RGB2BGR)
+        report = blur_analysis.analyze(bgr)
+        scale = self.source.scale or 1.0
+        d = self.recipe.deblur
+        # The verdict also weighs overall sharpness, so a frame the photographer
+        # has already judged blurred may come back "soft". Asked to de-blur, only
+        # the kind of blur matters: a directional loss of detail is a smear.
+        directionality, angle = blur_analysis.directional_blur(bgr)
+        motion = report.verdict == blur_analysis.MOTION_BLUR or (
+            report.verdict == blur_analysis.SOFT and directionality >= blur_analysis.MOTION_DIRECTIONALITY)
+        if motion:
+            d.blur_type, d.angle = "motion", float(report.motion_angle if report.motion_angle is not None else angle)
+            length = deblur.estimate_motion_length(encoded, d.angle)
+            if length is not None:
+                d.length = pr.clamp("deblur_length", length / scale)
+                message = f"Motion blur at {d.angle:.0f}°, about {d.length:.1f} px long."
+            else:
+                message = (f"Motion blur at {d.angle:.0f}°; its length could not be measured, "
+                           "so set Smear Length by eye.")
+        elif report.verdict in (blur_analysis.OUT_OF_FOCUS, blur_analysis.SOFT):
+            d.blur_type = "defocus"
+            radius = deblur.estimate_defocus_radius(encoded)
+            if radius is not None:
+                d.radius = pr.clamp("deblur_radius", radius / scale)
+                message = f"Out of focus, a blur about {d.radius:.1f} px in radius."
+            else:
+                message = "Out of focus; its size could not be measured, so set Defocus Radius by eye."
+        else:
+            self.deblur_status.setText(
+                f"The analysis found no clear motion or focus blur ({report.blur_kind.lower()}); "
+                "settings unchanged.")
+            return
+        if d.engine == "neural":
+            d.engine = "parametric"
+        d.enabled = True
+        self.deblur_status.setText(message)
+        self._load_controls()
+        self._apply_deblur("De-blurring")
 
     def _on_curve(self, points: list) -> None:
         setattr(self.recipe.curve, self.curve_channel.currentText(), points)
@@ -555,6 +821,7 @@ class DevelopWorkspace(Workspace):
         pasted = pr.from_dict(self._clipboard)
         # Framing and retouching belong to one photograph; tone and colour travel.
         pasted.geometry, pasted.layers, pasted.vectors = target.geometry, target.layers, target.vectors
+        pasted.deblur = target.deblur
         return pasted
 
     def _on_paste(self) -> None:
@@ -580,7 +847,7 @@ class DevelopWorkspace(Workspace):
         if self._history:
             self._future.append(pr.to_dict(self.recipe))
             self.recipe = pr.from_dict(self._history.pop())
-            self.session.set_recipe(self.key, self.recipe.copy())
+            self.session.set_recipe(self.key, self.recipe.copy(), self.version)
             self._load_controls()
             self._changed()
 
@@ -588,7 +855,7 @@ class DevelopWorkspace(Workspace):
         if self._future:
             self._history.append(pr.to_dict(self.recipe))
             self.recipe = pr.from_dict(self._future.pop())
-            self.session.set_recipe(self.key, self.recipe.copy())
+            self.session.set_recipe(self.key, self.recipe.copy(), self.version)
             self._load_controls()
             self._changed()
 
@@ -601,6 +868,54 @@ class DevelopWorkspace(Workspace):
         if on:
             self._before_key = None
             self._render()
+
+    def _pick_sibling(self, advance: bool = False) -> None:
+        """Choose which other version to show beside the one being edited."""
+        others = [v.id for v in self.session.versions(self.key)] if self.key else []
+        others = [v for v in others if v != self.version]
+        if not others:
+            self._sibling = None
+        elif advance and self._sibling in others:
+            self._sibling = others[(others.index(self._sibling) + 1) % len(others)]
+        elif self._sibling not in others:
+            # The next version along, so Master compares with Copy 1 first.
+            later = [v for v in others if v > self.version]
+            self._sibling = (later or others)[0]
+        self._sibling_key = None
+
+    def _toggle_versions(self, on: bool | None = None) -> None:
+        on = (not self._comparing_versions) if on is None else on
+        if on and (self.key is None or self.session.version_count(self.key) < 2):
+            self._comparing_versions = False
+            self.versions_button.setChecked(False)
+            self.status_label.setText("This photo has one version. Press + Version or + 3 Styles to branch another.")
+            return
+        self._comparing_versions = on
+        self.versions_button.setChecked(on)
+        self.sibling_canvas.setVisible(on)
+        self.main_caption.setVisible(on)
+        self.sibling_caption.setVisible(on)
+        if on:
+            self._pick_sibling()
+            self._show_names()
+            self._render()
+        else:
+            self._sibling, self._sibling_key = None, None
+            self.sibling_canvas.set_image(None)
+
+    def _next_sibling(self) -> None:
+        if not self._comparing_versions:
+            self._toggle_versions(True)
+            return
+        self._pick_sibling(advance=True)
+        self._show_names()
+        self._render()
+
+    def _step_version(self, offset: int) -> None:
+        if self.key is None or self.session.version_count(self.key) < 2:
+            return
+        self._commit()
+        self.session.step_version(self.key, offset)
 
     def _toggle_clipping(self) -> None:
         self._show_clipping = not self._show_clipping
@@ -618,6 +933,12 @@ class DevelopWorkspace(Workspace):
         shift = bool(mods & Qt.KeyboardModifier.ShiftModifier)
         if key == Qt.Key.Key_Backslash:
             self._toggle_compare()
+        elif key == Qt.Key.Key_V and shift and not ctrl:
+            self._next_sibling()
+        elif key == Qt.Key.Key_V and not ctrl:
+            self._toggle_versions()
+        elif key in (Qt.Key.Key_BracketLeft, Qt.Key.Key_BracketRight) and not ctrl:
+            self._step_version(-1 if key == Qt.Key.Key_BracketLeft else 1)
         elif key == Qt.Key.Key_J:
             self._toggle_clipping()
         elif key in (Qt.Key.Key_Left, Qt.Key.Key_Right) and not ctrl:
@@ -647,6 +968,8 @@ _RANGE_NAMES = {
     ("detail", "sharpen_amount"): "sharpen_amount", ("detail", "sharpen_radius"): "sharpen_radius",
     ("detail", "noise_reduction"): "noise_reduction", ("lens", "distortion"): "lens_distortion",
     ("lens", "vignette"): "lens_vignette", ("geometry", "rotation"): "rotation",
+    ("deblur", "angle"): "deblur_angle", ("deblur", "length"): "deblur_length",
+    ("deblur", "radius"): "deblur_radius", ("deblur", "damping"): "deblur_damping",
     ("geometry", "keystone_vertical"): "keystone", ("geometry", "keystone_horizontal"): "keystone",
 }
 

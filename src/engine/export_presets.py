@@ -9,6 +9,7 @@ that are left once rejects are dropped).
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -68,6 +69,15 @@ class FrameJob:
     context: layer_stack.RenderContext | None = None
     inpainter: object | None = None
     metadata: object | None = None
+    variant: str = ""           # added to the file name for a copy, e.g. "v2-moody"
+
+
+def version_tag(version: int, name: str) -> str:
+    """The file-name tag for a copy: ``v2-moody-edit``. Empty for the master."""
+    if version == 0:
+        return ""
+    slug = re.sub(r"[^a-z0-9]+", "-", name.casefold()).strip("-")[:32]
+    return f"v{version}-{slug}" if slug else f"v{version}"
 
 
 def render_frame(job: FrameJob, bits: int = 8) -> np.ndarray:
@@ -84,7 +94,7 @@ def render_frame(job: FrameJob, bits: int = 8) -> np.ndarray:
 def _names(paths: list[Path]) -> dict[Path, str]:
     """Output stems, made unique when two sources share one (IMG_1.CR2 + IMG_1.JPG)."""
     counts: dict[str, int] = {}
-    for path in paths:
+    for path in dict.fromkeys(paths):       # several versions of one file are one source
         counts[path.stem.lower()] = counts.get(path.stem.lower(), 0) + 1
     return {p: (f"{p.stem}_{p.suffix[1:].lower()}" if counts[p.stem.lower()] > 1 else p.stem) for p in paths}
 
@@ -110,7 +120,8 @@ def export_batch(
     written, failures = [], []
     bits = 16 if preset.fmt.endswith("16") else 8
     for index, job in enumerate(jobs, start=1):
-        target = destination / f"{names[job.path]}{preset.suffix}{preset.extension}"
+        variant = f"_{job.variant}" if job.variant else ""
+        target = destination / f"{names[job.path]}{variant}{preset.suffix}{preset.extension}"
         try:
             if target.resolve() == job.path.resolve():
                 raise ValueError("refusing to export over the original file")

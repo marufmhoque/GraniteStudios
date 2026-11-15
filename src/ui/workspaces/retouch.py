@@ -34,6 +34,7 @@ from src.ui.widgets.canvas import ImageCanvas
 from src.ui.widgets.controls import Section, SliderRow
 from src.ui.widgets.filmstrip import Filmstrip
 from src.ui.widgets.renderer import LatestOnlyRenderer
+from src.ui.widgets.versions import VersionBar
 from src.ui.workspaces.base import Workspace
 
 logger = logging.getLogger(__name__)
@@ -62,6 +63,7 @@ class RetouchWorkspace(Workspace):
     def __init__(self, shell) -> None:
         super().__init__(shell)
         self.key: str | None = None
+        self.version = topics.MASTER         # the version of ``key`` being edited
         self.source: dp.Source | None = None
         self.recipe = pr.Recipe()
         self.base: np.ndarray | None = None        # developed, no layers, no framing
@@ -141,6 +143,8 @@ class RetouchWorkspace(Workspace):
         note = QLabel("Shown before cropping and straightening. Middle mouse button pans; wheel zooms.")
         note.setObjectName("PageSubtitle")
         centre.addWidget(self.frame_label)
+        self.version_bar = VersionBar(self.session, self._commit)
+        centre.addWidget(self.version_bar)
         centre.addWidget(note)
         self.canvas = ImageCanvas()
         self.canvas.pan_with_left_button = False
@@ -229,8 +233,11 @@ class RetouchWorkspace(Workspace):
         if self.session.current != self.key:
             self.load(self.session.current)
         else:
-            # Develop may have changed the settings underneath the layers.
-            self.recipe = self.session.recipe(self.key).copy() if self.key else self.recipe
+            # Develop may have changed the settings, or the version, underneath the layers.
+            self.version = self.session.active_version(self.key) if self.key else self.version
+            self.recipe = self.session.recipe(self.key, self.version).copy() if self.key else self.recipe
+            self._show_name()
+            self._refresh_list()
             self._render(rebuild_base=True)
 
     def on_leave(self) -> None:
@@ -245,17 +252,33 @@ class RetouchWorkspace(Workspace):
             self.filmstrip.refresh()
             if topic == topics.CURRENT and self.shell.__dict__.get("_current_index") is not None and self.shell.current_workspace is self and self.session.current != self.key:
                 self.load(self.session.current)
+        elif topic == topics.VERSIONS and self.key is not None:
+            shown = self.shell.__dict__.get("_current_index") is not None and self.shell.current_workspace is self
+            if shown and self.session.active_version(self.key) != self.version:
+                self.session.save_recipes()
+                self.version = self.session.active_version(self.key)
+                self.recipe = self.session.recipe(self.key, self.version).copy()
+                self._clone_source = None
+                self._refresh_list()
+                self._render(rebuild_base=True)
+            self._show_name()
+
+    def _show_name(self) -> None:
+        if self.key is not None:
+            self.frame_label.setText(self.session.display_name(self.key, self.version))
 
     def load(self, key: str | None) -> None:
         self.session.save_recipes()
+        self.version_bar.set_photo(key)
         self.key, self.base, self._base_key = key, None, None
         self._context, self._clone_source = None, None
         if key is None:
             self.source = None
             self.canvas.set_image(None)
             return
-        self.recipe = self.session.recipe(key).copy()
-        self.frame_label.setText(Path(key).name)
+        self.version = self.session.active_version(key)
+        self.recipe = self.session.recipe(key, self.version).copy()
+        self._show_name()
         self._refresh_list()
         self.canvas.caption = "Loading…"
         path = Path(key)
@@ -323,7 +346,7 @@ class RetouchWorkspace(Workspace):
 
     def _commit(self) -> None:
         if self.key is not None:
-            self.session.set_recipe(self.key, self.recipe.copy())
+            self.session.set_recipe(self.key, self.recipe.copy(), self.version)
 
     def _refresh_list(self, select: int | None = None) -> None:
         layers = self._layers()

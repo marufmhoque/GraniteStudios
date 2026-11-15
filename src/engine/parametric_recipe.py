@@ -12,6 +12,15 @@ Where recipes live
 never beside the originals, and named after the whole filename so that
 ``IMG_1.CR2`` and ``IMG_1.JPG`` shot together do not share a recipe.
 
+Versions ("virtual copies")
+---------------------------
+A photograph can carry several independent edits of one original. The
+first is the master and keeps the name above; each copy is another small
+recipe, ``<filename>.granite-v<N>.json``, beside it. A copy duplicates only
+the settings, never the pixels: every version renders from the same source
+file. The two name forms cannot collide, because a master's sidecar always
+ends ``.granite.json`` and a copy's never does.
+
 Robustness
 ----------
 A recipe file can be damaged, hand-edited, or written by a newer version of
@@ -36,6 +45,8 @@ logger = logging.getLogger(__name__)
 
 RECIPE_VERSION = 1
 SIDECAR_SUFFIX = ".granite.json"
+VERSION_MARK = ".granite-v"          # <filename>.granite-v<N>.json
+MASTER = 0                           # the version id of the master edit
 
 HSL_BANDS = ("red", "orange", "yellow", "green", "aqua", "blue", "purple", "magenta")
 # Centre of each band on the hue circle, in degrees.
@@ -72,7 +83,15 @@ RANGES: dict[str, tuple[float, float]] = {
     "lens_vignette": (-100.0, 100.0),
     "lut_strength": (0.0, 100.0),
     "look_strength": (0.0, 100.0),
+    "deblur_angle": (0.0, 180.0),
+    "deblur_length": (1.0, 30.0),
+    "deblur_radius": (1.0, 20.0),
+    "deblur_damping": (0.0, 1.0),
 }
+
+DEBLUR_ENGINES = ("parametric", "wiener_fast", "neural")
+DEBLUR_TYPES = ("motion", "defocus")
+DEBLUR_MASKS = ("full", "face_only", "subject_only")
 
 
 def clamp(name: str, value: Any, default: float = 0.0) -> float:
@@ -183,6 +202,25 @@ class Detail:
 
 
 @dataclass
+class Deblur:
+    """Recovering motion smear or missed focus (see ``ai_tools/deblur.py``).
+
+    Lengths and radii are in pixels of the full-size original, so a setting
+    means the same thing in the preview and the export. ``angle`` is the
+    direction of the smear, counter-clockwise from horizontal on screen.
+    """
+
+    enabled: bool = False
+    engine: str = "parametric"   # "parametric" | "wiener_fast" | "neural"
+    blur_type: str = "motion"    # "motion" | "defocus"
+    angle: float = 0.0
+    length: float = 5.0
+    radius: float = 3.0
+    damping: float = 0.05        # artifact suppression, 0..1
+    mask_mode: str = "full"      # "full" | "face_only" | "subject_only"
+
+
+@dataclass
 class Look:
     """A colour look: a channel-mixing matrix with a lift and gamma.
 
@@ -213,6 +251,7 @@ class Recipe:
     geometry: Geometry = field(default_factory=Geometry)
     lens: Lens = field(default_factory=Lens)
     detail: Detail = field(default_factory=Detail)
+    deblur: Deblur = field(default_factory=Deblur)
     look: Look = field(default_factory=Look)
     lut: Lut = field(default_factory=Lut)
     layers: list = field(default_factory=list)       # see layer_stack.py
@@ -363,6 +402,22 @@ def from_dict(data: Any) -> Recipe:
         _number("noise_reduction", detail.get("noise_reduction"), 0.0),
     )
 
+    deblur = _section(data.get("deblur"))
+
+    def choice(value, allowed: tuple, default: str) -> str:
+        return value if value in allowed else default
+
+    recipe.deblur = Deblur(
+        deblur.get("enabled") is True,
+        choice(deblur.get("engine"), DEBLUR_ENGINES, "parametric"),
+        choice(deblur.get("blur_type"), DEBLUR_TYPES, "motion"),
+        _number("deblur_angle", deblur.get("angle"), 0.0),
+        _number("deblur_length", deblur.get("length"), 5.0),
+        _number("deblur_radius", deblur.get("radius"), 3.0),
+        _number("deblur_damping", deblur.get("damping"), 0.05),
+        choice(deblur.get("mask_mode"), DEBLUR_MASKS, "full"),
+    )
+
     look = _section(data.get("look"))
     matrix = _matrix(look.get("matrix"))
     if matrix is not None:
@@ -417,14 +472,39 @@ def loads(text: str) -> Recipe:
 # Sidecar files
 # --------------------------------------------------------------------- #
 
-def sidecar_path(source: str | Path, edit_folder: str | Path) -> Path:
-    """Where the recipe for ``source`` is kept. Always inside the edit folder."""
-    return Path(edit_folder) / f"{Path(source).name}{SIDECAR_SUFFIX}"
+def sidecar_path(source: str | Path, edit_folder: str | Path, version: int = MASTER) -> Path:
+    """Where a version's recipe for ``source`` is kept. Always inside the edit folder."""
+    name = Path(source).name
+    if version == MASTER:
+        return Path(edit_folder) / f"{name}{SIDECAR_SUFFIX}"
+    if int(version) < 0:
+        raise ValueError("version ids are positive")
+    return Path(edit_folder) / f"{name}{VERSION_MARK}{int(version)}.json"
 
 
-def load(source: str | Path, edit_folder: str | Path) -> Recipe:
+def version_files(edit_folder: str | Path) -> dict[str, list[int]]:
+    """Every copy's recipe in an edit folder, as ``{source filename: [ids]}``.
+
+    Read from the file names alone, so copies survive a lost session file.
+    """
+    found: dict[str, list[int]] = {}
+    try:
+        entries = list(Path(edit_folder).iterdir())
+    except OSError:
+        return found
+    for entry in entries:
+        name = entry.name
+        if not name.endswith(".json") or VERSION_MARK not in name:
+            continue
+        stem, _, number = name[:-5].rpartition(VERSION_MARK)
+        if stem and number.isdigit() and int(number) > 0:
+            found.setdefault(stem, []).append(int(number))
+    return {k: sorted(v) for k, v in found.items()}
+
+
+def load(source: str | Path, edit_folder: str | Path, version: int = MASTER) -> Recipe:
     """The saved recipe for a photograph, or a neutral one. Never raises."""
-    path = sidecar_path(source, edit_folder)
+    path = sidecar_path(source, edit_folder, version)
     try:
         # Decode leniently: a sidecar holding binary rubbish should fail as
         # "not valid JSON" below, not as a decoding error here.
@@ -441,13 +521,13 @@ def load(source: str | Path, edit_folder: str | Path) -> Recipe:
     return recipe
 
 
-def save(recipe: Recipe, source: str | Path, edit_folder: str | Path) -> Path | None:
-    """Write the recipe for ``source``. A neutral recipe removes the file.
+def save(recipe: Recipe, source: str | Path, edit_folder: str | Path,
+         version: int = MASTER) -> Path | None:
+    """Write a version's recipe for ``source``. A neutral recipe removes the file.
 
-    This is the only function in the module that touches the disk for
-    writing, and it only ever writes inside ``edit_folder``.
+    This module only ever writes inside ``edit_folder``.
     """
-    path = sidecar_path(source, edit_folder)
+    path = sidecar_path(source, edit_folder, version)
     if recipe.is_neutral:
         if path.exists():
             path.unlink()
@@ -457,6 +537,18 @@ def save(recipe: Recipe, source: str | Path, edit_folder: str | Path) -> Path | 
     temporary.write_text(dumps(recipe), encoding="utf-8")
     temporary.replace(path)     # never leave a half-written recipe behind
     return path
+
+
+def discard(source: str | Path, edit_folder: str | Path, version: int) -> bool:
+    """Remove a copy's recipe. The master's cannot be removed this way, and
+    nothing outside the edit folder is ever touched."""
+    if version == MASTER:
+        raise ValueError("the master edit is not a copy")
+    path = sidecar_path(source, edit_folder, version)
+    if path.exists():
+        path.unlink()
+        return True
+    return False
 
 
 # --------------------------------------------------------------------- #
@@ -481,4 +573,62 @@ def with_look(name: str, base: Recipe | None = None) -> Recipe:
         raise KeyError(f"Unknown look {name!r}. Choose from: {', '.join(looks)}")
     recipe = base.copy() if base is not None else Recipe()
     recipe.look = looks[name]
+    return recipe
+
+
+# --------------------------------------------------------------------- #
+# Style versions
+# --------------------------------------------------------------------- #
+
+def _fade(lift: float, roll: float) -> list:
+    """A master curve with lifted blacks and softened whites."""
+    return [[0.0, lift], [0.25, 0.25 + lift * 0.4], [0.75, 0.76], [1.0, 1.0 - roll]]
+
+
+def _nudge(recipe: Recipe, **changes: float) -> None:
+    """Add to Basic sliders, staying inside their ranges."""
+    for name, delta in changes.items():
+        setattr(recipe.basic, name, clamp(name, getattr(recipe.basic, name) + delta))
+
+
+def _cinematic(recipe: Recipe) -> None:
+    recipe.look = builtin_looks()["cinematic_teal_orange"]
+    recipe.lut = Lut()
+    _nudge(recipe, contrast=12, highlights=-20, shadows=10, vibrance=-8)
+    recipe.curve.master = _fade(0.04, 0.03)
+    recipe.grade.shadows = GradeWheel(200.0, 18.0, 0.0)
+    recipe.grade.highlights = GradeWheel(35.0, 14.0, 0.0)
+
+
+def _warm_analog(recipe: Recipe) -> None:
+    recipe.look = builtin_looks()["warm_film"]
+    recipe.lut = Lut()
+    _nudge(recipe, temperature=14, tint=4, highlights=-15, vibrance=6, saturation=-6)
+    recipe.curve.master = _fade(0.07, 0.04)
+    recipe.grade.highlights = GradeWheel(45.0, 12.0, 0.0)
+
+
+def _clean_mono(recipe: Recipe) -> None:
+    # Colour settings would only tint a monochrome result, so they go.
+    recipe.look, recipe.lut, recipe.grade, recipe.hsl = Look(), Lut(), ColorGrade(), HSL()
+    _nudge(recipe, contrast=18, clarity=10, whites=10, blacks=-8)
+    recipe.basic.saturation = RANGES["saturation"][0]
+    recipe.basic.vibrance = 0.0
+
+
+# Name -> how that style changes a copy of the master. Tone, framing, lens,
+# detail, layers and overlays are kept, so a crop or a retouch carries over.
+VERSION_STYLES = {
+    "Cinematic": _cinematic,
+    "Warm Analog": _warm_analog,
+    "Clean B&W": _clean_mono,
+}
+
+
+def styled(name: str, base: Recipe | None = None) -> Recipe:
+    """A copy of ``base`` (or a neutral recipe) in one of :data:`VERSION_STYLES`."""
+    if name not in VERSION_STYLES:
+        raise KeyError(f"Unknown style {name!r}. Choose from: {', '.join(VERSION_STYLES)}")
+    recipe = base.copy() if base is not None else Recipe()
+    VERSION_STYLES[name](recipe)
     return recipe

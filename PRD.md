@@ -63,7 +63,9 @@ workspaces. In summary:
 | Develop | Six fixed grades | Float parametric develop engine ([FR-7](#fr-7-develop-engine)) |
 | Retouching | None | Layers, masks, heal, clone, skin, teeth, eyes, inpainting ([FR-16](#fr-16-layers-masks-and-retouching)) |
 | Graphics | None | Vector text, shapes, watermarks; SVG and PDF ([FR-17](#fr-17-design-and-vector-graphics)) |
-| Tests | None | **493** pytest tests ([7](#7-quality-and-verification)) |
+| Versions | None | Virtual copies with style branches, added in 2.1 ([FR-19](#fr-19-versions-virtual-copies)) |
+| De-blur | Unsharp mask only | Deconvolution of motion and focus blur, added in 2.1 ([FR-20](#fr-20-de-blur-deconvolution)) |
+| Tests | None | **570** pytest tests ([7](#7-quality-and-verification)) |
 
 ---
 
@@ -281,7 +283,8 @@ watermark changes the photograph's **recipe**. No image is written until the
 user exports, and the source is only ever read.
 
 - **Enforcement:** `parametric_recipe.save()` is the only writer of edit
-  state and only writes `<Folder>-edit/<filename>.granite.json`. Rendering
+  state and only writes `<Folder>-edit/<filename>.granite.json` (or, for a
+  version, `<filename>.granite-v<N>.json`). Rendering
   (`develop_pipeline.render`) is a pure function of pixels and recipe.
   Heal and clone are stored as positions, not pixels.
 - **Verification:** `test_editing_and_previewing_write_nothing` (every kind of
@@ -558,6 +561,82 @@ tile on the CPU (one measurement).
 
 **Module:** `engine/export_presets.py`, `ui/workspaces/export.py`.
 
+### FR-19 Versions (virtual copies)
+
+*(New in 2.1.)* A photograph can carry several independent edits of one
+original, as Lightroom's virtual copies do.
+
+| ID | Requirement | Acceptance criteria | Status |
+| --- | --- | --- | --- |
+| FR-19.1 | Lightweight copies (VRS-01) | Creating a version copies the active version's recipe into `<filename>.granite-v<N>.json`; no pixel data is duplicated; the original is untouched | **Done** |
+| FR-19.2 | Independent edits (VRS-02) | Each version is edited, saved and undone on its own; switching never writes one version's settings into another | **Done** |
+| FR-19.3 | Version bar (VRS-03) | Pills for Master, Copy 1, ... above the picture in Develop, Retouch and Design; click to switch; `+ Version`; rename and remove from the `⋯` menu or by right-clicking a pill | **Done** |
+| FR-19.4 | Grid badge (VRS-03) | A thumbnail with more than one version shows `v2/3` (active version / count), with every version named in its tooltip | **Done** |
+| FR-19.5 | Side-by-side compare (VRS-03) | **V** shows another version beside the one being edited, zoom and pan locked; **Shift+V** picks which; **[** / **]** switch the version being edited | **Done** |
+| FR-19.6 | Style versions in one action (VRS-04) | `+ 3 Styles` (or right-click / Versions menu in Cull, for a whole selection) branches Cinematic, Warm Analog and Clean B&W from the master, keeping its crop, lens, detail, layers and overlays | **Done** |
+| FR-19.7 | Naming (UX 2) | Copies are named `Copy 1`, `Copy 2`...; any name can be given (`Moody Edit`); names are unique per photograph; the title reads `IMG_1.CR2 (Copy 1)` | **Done** |
+| FR-19.8 | Export | Each version exports as its own file, `IMG_1_v2-moody-edit.jpg`; or only the active version, by unticking *Export every version* | **Done** |
+| FR-19.9 | Persistence | Names and the active version are kept in `session.granite.json`; copies are also found from their recipe files, so a lost session file loses only the names | **Done** |
+
+Ratings, colour labels, picks and rejection belong to the photograph and are
+shared by all its versions; a rejected photograph exports no versions. The
+publishing tools (gallery, Instagram, reel, background removal) use each
+photograph's active version.
+
+**Module:** `engine/session.py` (version state), `engine/parametric_recipe.py`
+(versioned sidecars, `VERSION_STYLES`), `ui/widgets/versions.py` (the bar),
+`engine/export_presets.py` (file names).
+
+**Verified:** `tests/test_versions.py` (21 tests): copies hold settings only
+and leave originals byte-identical; edits stay independent; names, switching,
+wrapping, removal (master protected); survival of reopening, of a lost
+session file and of damaged entries; the three styles render as described
+(Clean B&W is monochrome to within two levels, Warm Analog is warmer than it
+is blue); the bar, grid badge, right-click menu, compare view and both export
+modes driven through the real window.
+
+### FR-20 De-blur (deconvolution)
+
+*(New in 2.1.)* Recovers motion smear and missed focus by deconvolution:
+inverting a modelled blur, not raising edge contrast. Sharpening
+([FR-3](#fr-3-blur-triage)) remains for mild softness.
+
+| ID | Requirement | Acceptance criteria | Status |
+| --- | --- | --- | --- |
+| FR-20.1 | Blur models | Anti-aliased linear motion PSF (length, angle) and pillbox defocus PSF (radius), each summing to 1 | **Done** |
+| FR-20.2 | Full-quality engine | Damped Richardson-Lucy (White damping, Biggs-Andrews acceleration), float32 per channel, estimate clamped to the photograph's range | **Done** — +5.2 dB on 45°/10 px motion blur at σ 0.002 (spec: ≥ 4.5 dB) |
+| FR-20.3 | Live engine | Closed-form Wiener filter while a de-blur slider is held; Richardson-Lucy on release | **Done**, not to the 20 ms target — **153 ms** on a 1600 px preview (i5-8350U; one FFT of that frame alone costs ~45 ms) |
+| FR-20.4 | Boundaries | Reflection extension plus MATLAB-style edge taper; border error below a plain FFT's | **Done** — 0.028 vs 0.086 mean border error |
+| FR-20.5 | Any frame size | Deconvolution in 2048 px tiles with a three-kernel margin; tiled and whole results agree to 1e-3 mean | **Done** — 24 MP in 66 s (Richardson-Lucy, CPU) |
+| FR-20.6 | Neural engine | NAFNet-GoPro (opencv_zoo, 92 MB, MIT), 512 px tiles with 64 px cross-fades; consent before download | **Done, slow and modest** — on a photograph +0.8 to +2.0 dB for 9–25 px smears, −0.8 dB at 5 px; 11 s per 512 px tile, **136 s** for a 1600 px preview on the i5-8350U CPU ([8.12](#812-the-neural-de-blur-is-slow-and-modest)) |
+| FR-20.7 | Linear light | Runs on the linear source before lens correction and tone; neural engine on display-encoded values (its training domain) | **Done** |
+| FR-20.8 | Preview = export | Lengths and radii are in full-size pixels and scaled by the source's `scale`, so a proxy uses a proportionally smaller kernel | **Done** |
+| FR-20.9 | Subject / face only | Mask from U2Net (subject) or the face mesh (face ovals), found on a 1280 px copy; a missing mask falls back to the whole frame and says so | **Done** |
+| FR-20.10 | Auto-detect | Angle from `blur_analysis`; length or radius from the cepstrum, reported in full-size pixels | **Done** — length within 1.5 px (or 10 %) for 8–30 px, radius within 1 px for 5–12 px, on synthetic blur |
+| FR-20.11 | Non-destructive | Settings in the recipe's `deblur` section; per photograph (not pasted or synced) | **Done** |
+
+Measured trade-off between the engines (PSNR gain over the blurred frame,
+synthetic, `damping` = Artifact Suppression):
+
+| Noise σ | Blur | RL 0.05 | RL 0.3 | Wiener 0.05 | Wiener 0.3 |
+| --- | --- | --- | --- | --- | --- |
+| 0.002 | motion 10 px | +5.17 | +2.61 | +6.19 | +6.04 |
+| 0.01 | motion 10 px | +3.56 | +2.98 | −0.06 | +3.09 |
+| 0.02 | motion 10 px | +0.01 | +2.29 | −4.90 | −0.68 |
+| 0.002 | defocus 4 px | +3.62 | +2.51 | +4.85 | +4.17 |
+| 0.02 | defocus 4 px | +0.90 | +1.67 | −4.78 | +0.19 |
+
+The Wiener filter wins only on nearly noise-free input and turns harmful as
+noise rises; Richardson-Lucy degrades gracefully, and raising Artifact
+Suppression helps it on noisy frames. That is why Wiener is used only to
+follow the slider.
+
+**Module:** `ai_tools/deblur.py`, `engine/develop_pipeline.py`
+(`deblur_source`, `Source.scale`), `ui/workspaces/develop.py` (Detail ▸
+De-Blur), `ai_tools/segmentation.py` (`Segmenter.face`).
+
+**Verified:** `tests/test_deblur.py` (58 tests).
+
 ---
 
 ## 5. Non-functional requirements
@@ -714,7 +793,8 @@ the hosted backend and the tests use the same code as the desktop.
 | `engine/phone_media.py` | Gain maps, motion and live photos, deep HEIC | 447 |
 | `ai_tools/retouch.py` | Skin, teeth, eyes, inpainting | 337 |
 | `ai_tools/person_clustering.py` | Embeddings, DBSCAN, people index | 312 |
-| `engine/session.py` | Shared state and persistence | 281 |
+| `engine/session.py` | Shared state, versions and persistence | 484 |
+| `ui/widgets/versions.py` | The version bar | 208 |
 | `ui/main_window.py` | Workspace bar, consent, tasks | 319 |
 | `engine/hardware.py` | Providers, sessions, RAM | 241 |
 
@@ -725,9 +805,10 @@ Vacation2024/                          # originals — never modified or moved
 ├── DSC_0001.NEF
 ├── DSC_0002.NEF
 └── Vacation2024-edit/                 # created on load
-    ├── DSC_0001.NEF.granite.json      # recipe (INV-7)
+    ├── DSC_0001.NEF.granite.json      # recipe (INV-7): the master version
+    ├── DSC_0001.NEF.granite-v1.json   # a version (FR-19), settings only
     ├── DSC_0001.NEF.granite.assets/   # pixel-layer patches, if any
-    ├── session.granite.json           # ratings, labels, picks, rejects, web marks
+    ├── session.granite.json           # ratings, labels, picks, rejects, web marks, version names
     ├── people.granite.json            # who appears where
     ├── people.granite.npz             # face embeddings (deleted by Forget Faces)
     ├── DSC_0001_edit.jpg              # delivery copy for the publishing tools
@@ -748,6 +829,7 @@ File exports go where the user chooses. Video keeps its per-clip
 | PP-HumanSeg | Person mask | 6,163,938 | opencv_zoo | On consent |
 | EfficientSAM-Ti | Click-to-select, hair | 48,312,857 | opencv_zoo | On consent |
 | LaMa | Neural inpainting | 92,591,623 | opencv_zoo | On consent |
+| NAFNet (GoPro) | AI de-blur | 91,736,251 | Hugging Face `opencv/deblurring_nafnet` | On consent |
 | U2Net (via `rembg`) | Background removal, subject mask | 175,997,641 | rembg | Installer |
 
 All are pinned by SHA-256 and size. The face landmarker is a zip archive,
@@ -769,7 +851,7 @@ verified whole and unpacked in memory, so no unverified file reaches disk.
 
 ### 7.1 Approach
 
-**493 pytest tests** (492 pass and 1 skips on the development machine, where
+**570 pytest tests** (569 pass and 1 skips on the development machine, where
 the hosted backend's own requirements are not installed). They exercise the
 real engines and the real window — headless, with `QT_QPA_PLATFORM=offscreen`
 — and mock nothing but file dialogs and, in two tests, the network.
@@ -793,6 +875,8 @@ repository, which may sit on a synced drive.
 | `test_face_mesh_ear.py` | 38 | EAR geometry exactly; open/shut on reference faces; head roll; smile vs open mouth |
 | `test_retouch.py` | 20 | Frequency separation keeps pores; teeth; eyes; inpainting; corner fill; masks |
 | `test_workspaces.py` | 21 | Every workspace driven end to end |
+| `test_versions.py` | 21 | Versions: settings-only copies, independence, names, persistence, styles, UI, export |
+| `test_deblur.py` | 58 | PSFs, 4.5 dB regression, damping, clamping, boundaries, tiling, estimators, preview = export, masks, model absence, Develop end to end |
 | `test_phone_media.py` | 18 | Live/Motion Photos, gain-map arithmetic, 10-bit HEIC, metadata |
 | `test_culling_score.py` | 16 | Keeper score arithmetic, composition, region sharpness, the mesh in a cull |
 | `test_hardware.py` | 14 | Provider choice per platform, fallback, agreement with the CPU |
@@ -879,6 +963,35 @@ name at all, so they get no profile; the interface says so.
 The Nikon Z50 II NEF and the Samsung S10 DNG fail LibRaw's full decode. Both
 cull normally from their previews and open in Develop from their embedded
 JPEG, with a note.
+
+### 8.11 De-blur assumes one blur for the whole frame
+
+The PSF is a single global estimate. Blur that differs across the frame (a
+subject moving against a still background, a spinning wheel, camera roll)
+is not modelled; *Subject only* limits where the result applies but not
+what blur it assumes. Every accuracy figure is on synthetic blur. Detail the
+blur erased (where its spectrum is zero) does not come back, and pushing
+the settings shows as ringing and amplified noise.
+
+### 8.12 The neural de-blur is slow and modest
+
+NAFNet (92 MB, roughly three times the 28 MB the request assumed) was
+downloaded, matched its pinned SHA-256, and run here with OpenCV's own demo
+preprocessing. Measured gains over the blurred frame:
+
+| Input | 5 px | 9 px | 15 px at 30° | 25 px at 45° |
+| --- | --- | --- | --- | --- |
+| A photograph (scikit-image's *astronaut*) | −0.84 dB | +0.82 dB | +1.54 dB | +2.00 dB |
+| The flat synthetic test scene | −5.83 dB | −2.51 dB | +0.03 dB | +0.63 dB |
+
+It is a blind method, so it needs no settings, but it recovers less than
+Richardson-Lucy given the right blur (+5.2 dB in FR-20.2), and on flat
+graphics outside its GoPro training it distorts the frame: a sharp copy of
+the synthetic scene comes back at 18.4 dB. It takes 10.8 s per 512 px tile
+on the i5-8350U CPU, 136 s for a 1600 px preview, and an estimated 20+
+minutes for a 24 MP export; OpenCV's OpenCL target measured no faster
+(10.2 s). Its test needs scikit-image, which the app does not install, and
+skips without it.
 
 ---
 

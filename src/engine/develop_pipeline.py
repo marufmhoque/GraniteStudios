@@ -45,8 +45,11 @@ accelerated" is not claimed: this is vectorised NumPy and OpenCV on the CPU.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import logging
 import math
+import threading
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -54,7 +57,7 @@ import cv2
 import numpy as np
 
 from src.engine import fast_preview
-from src.engine.parametric_recipe import HSL_CENTRES, Geometry, Recipe
+from src.engine.parametric_recipe import HSL_CENTRES, Deblur, Geometry, Recipe
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +131,11 @@ class Source:
     # file developed to linear light has no tone curve, so with none of
     # this it looks a stop or two darker than the camera's own JPEG.
     baseline: float = 0.0
+    # Pixels of ``data`` per pixel of the full-size frame: 0.5 for a
+    # half-size RAW decode, less again for a preview proxy. Settings given
+    # in pixels (a de-blur smear length) are multiplied by it, so they mean
+    # the same thing in the preview and the export.
+    scale: float = 1.0
 
     @property
     def size(self) -> tuple[int, int]:
@@ -150,7 +158,9 @@ class Source:
 
     def proxy(self, max_side: int) -> "Source":
         """A smaller copy, for interactive preview."""
-        return dataclasses.replace(self, data=fast_preview.fit(self.data, max_side))
+        data = fast_preview.fit(self.data, max_side)
+        factor = max(data.shape[:2]) / float(max(self.data.shape[:2]))
+        return dataclasses.replace(self, data=data, scale=self.scale * factor)
 
 
 def from_array(array: np.ndarray, linear: bool = False) -> Source:
@@ -182,7 +192,7 @@ def open_source(path: str | Path, half_size: bool = False, hdr: bool = False) ->
                         use_camera_wb=True, half_size=half_size,
                         output_color=rawpy.ColorSpace.sRGB,
                     )
-                source = Source(rgb, True, path, True)
+                source = Source(rgb, True, path, True, scale=0.5 if half_size else 1.0)
                 # Measured once from the frame, so it is the same in every
                 # preview and export of it. Never darkens; at most 3 stops.
                 source.baseline = float(np.clip(auto_tone(source), 0.0, 3.0))
@@ -1065,7 +1075,7 @@ def render(
     may need). Without it the stack is skipped. ``inpainter`` is used to
     fill the corners when the recipe asks for that.
     """
-    out = _render_pixels(source, recipe, bits)
+    out = _render_pixels(source, recipe, bits, getattr(layers, "segmenter", None))
     if layers is not None and recipe.layers:
         from src.engine import layer_stack
 
@@ -1108,8 +1118,12 @@ def _fill_blank(image: np.ndarray, coverage: np.ndarray, inpainter) -> np.ndarra
     return np.where(hole[:, :, None] > 0, filled, image)
 
 
-def _render_pixels(source: Source, recipe: Recipe, bits: int) -> np.ndarray:
+def _render_pixels(source: Source, recipe: Recipe, bits: int, segmenter=None) -> np.ndarray:
     """The develop settings only: no layers, no framing."""
+    if recipe.deblur.enabled:
+        # First, on the pixels as the sensor recorded them: blur happened
+        # before any lens correction resampled them.
+        source = deblur_source(source, recipe.deblur, segmenter)
     if recipe.lens.profile:
         source = correct_lens_geometry(source)
     if recipe.lens.distortion:
@@ -1230,3 +1244,110 @@ def write_image(image: np.ndarray, destination: str | Path, fmt: str = "jpeg",
     else:
         picture.save(destination, "TIFF", compression="tiff_lzw", **extra)
     return destination
+
+
+# --------------------------------------------------------------------- #
+# De-blurring
+# --------------------------------------------------------------------- #
+
+MASK_SIDE = 1280                # de-blur masks are found on a copy this size
+DEBLUR_CACHE_PIXELS = 8_000_000  # results up to this size are remembered...
+DEBLUR_CACHE_ENTRIES = 2         # ...two of them: the quick preview and the full result
+_deblur_cache: "OrderedDict[tuple, Source]" = OrderedDict()
+_deblur_lock = threading.Lock()
+_engines: dict = {}
+
+
+def _fingerprint(source: Source) -> str:
+    sample = np.ascontiguousarray(source.data[::61, ::59])
+    return hashlib.sha1(sample.tobytes()).hexdigest() + repr(source.data.shape) + str(source.data.dtype)
+
+
+def wiener_snr(damping: float) -> float:
+    """Artifact suppression as the Wiener filter's signal-to-noise ratio:
+    0 trusts the photograph fully (400), 1 regularises hard (4)."""
+    return float(10.0 ** (2.6 - 2.0 * float(np.clip(damping, 0.0, 1.0))))
+
+
+def _neural_engine():
+    from src.ai_tools import deblur
+
+    engine = _engines.get("neural")
+    if engine is None or not engine.available:
+        engine = deblur.TiledNeuralDeblur(download=False)
+        _engines["neural"] = engine
+    return engine
+
+
+def _segmenter(given):
+    if given is not None:
+        return given
+    if "segmenter" not in _engines:
+        from src.ai_tools.segmentation import Segmenter
+
+        _engines["segmenter"] = Segmenter(download=False)
+    return _engines["segmenter"]
+
+
+def deblur_mask(source: Source, mask_mode: str, segmenter=None) -> tuple[np.ndarray | None, str | None]:
+    """Where de-blurring applies, at the source's size, and a note when it
+    cannot be found. Found on a copy of the frame :data:`MASK_SIDE` across,
+    so a preview and the export get the same mask."""
+    small = source.proxy(MASK_SIDE)
+    rgb = np.round(srgb_encode(small.to_linear()) * 255.0).astype(np.uint8)
+    engine = _segmenter(segmenter)
+    result = engine.face(rgb) if mask_mode == "face_only" else engine.mask(rgb, "subject")
+    if result.is_empty:
+        return None, result.note or "no area was found"
+    width, height = source.size
+    return cv2.resize(result.mask, (width, height), interpolation=cv2.INTER_LINEAR), result.note
+
+
+def deblur_source(source: Source, settings: Deblur, segmenter=None) -> Source:
+    """The source with its blur removed, as a new linear 16-bit source.
+
+    The work happens in linear light, where blur is physically a weighted
+    average. The neural engine is the exception: it was trained on
+    display-encoded images, so it is given those. When a model or a mask is
+    missing the step degrades to what can be done (the whole frame, or no
+    de-blur at all) and says so in ``note``; it never downloads.
+    """
+    from src.ai_tools import deblur
+
+    key = (_fingerprint(source), source.scale, repr(dataclasses.asdict(settings)))
+    with _deblur_lock:
+        if key in _deblur_cache:
+            _deblur_cache.move_to_end(key)
+            return _deblur_cache[key]
+
+    notes = []
+    linear = source.to_linear()
+    if settings.engine == "neural":
+        engine = _neural_engine()
+        if not engine.available:
+            return dataclasses.replace(source, note="the AI de-blur model is not downloaded; de-blur skipped")
+        restored = srgb_decode(engine.restore(srgb_encode(linear)))
+    else:
+        length, radius = settings.length * source.scale, settings.radius * source.scale
+        if (settings.blur_type == "motion" and length < 1.5) or (settings.blur_type == "defocus" and radius < 0.75):
+            return source              # smaller than a pixel at this size: nothing to undo
+        kernel = deblur.kernel_for(settings.blur_type, length, settings.angle, radius)
+        if settings.engine == "wiener_fast":
+            restored = deblur.deconvolve(linear, kernel, "wiener", snr=wiener_snr(settings.damping), taper=False)
+        else:
+            restored = deblur.deconvolve(linear, kernel, "parametric", damping=settings.damping)
+
+    if settings.mask_mode != "full":
+        mask, note = deblur_mask(source, settings.mask_mode, segmenter)
+        if mask is None:
+            notes.append(f"{note}; de-blurred the whole frame")
+        else:
+            restored = linear + (restored - linear) * mask[:, :, None]
+    data = np.round(np.clip(restored, 0.0, 1.0) * 65535.0).astype(np.uint16)
+    result = dataclasses.replace(source, data=data, linear=True, note="; ".join(notes) or source.note)
+    if data.shape[0] * data.shape[1] <= DEBLUR_CACHE_PIXELS:
+        with _deblur_lock:
+            _deblur_cache[key] = result
+            while len(_deblur_cache) > DEBLUR_CACHE_ENTRIES:
+                _deblur_cache.popitem(last=False)
+    return result

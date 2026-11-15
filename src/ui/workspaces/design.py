@@ -32,6 +32,7 @@ from src.ui.widgets.canvas import ImageCanvas
 from src.ui.widgets.controls import Section, SliderRow
 from src.ui.widgets.filmstrip import Filmstrip
 from src.ui.widgets.renderer import LatestOnlyRenderer
+from src.ui.widgets.versions import VersionBar
 from src.ui.workspaces.base import Workspace
 
 logger = logging.getLogger(__name__)
@@ -75,6 +76,7 @@ class DesignWorkspace(Workspace):
     def __init__(self, shell) -> None:
         super().__init__(shell)
         self.key: str | None = None
+        self.version = topics.MASTER         # the version of ``key`` being edited
         self.source: dp.Source | None = None
         self.items: list[vc.Item] = []
         self.size = (1600, 1067)
@@ -130,6 +132,7 @@ class DesignWorkspace(Workspace):
         self.frame_label = QLabel("No photo open")
         self.frame_label.setObjectName("PageTitle")
         bar.addWidget(self.frame_label, stretch=1)
+        self.version_bar = VersionBar(self.session, self._commit)
         self.snap = QCheckBox("Snap")
         self.snap.setChecked(True)
         self.grid_size = QComboBox()
@@ -142,6 +145,7 @@ class DesignWorkspace(Workspace):
         bar.addWidget(self._button("Export SVG…", self._on_export_svg, "The design alone, as vector SVG"))
         bar.addWidget(self._button("Export PDF…", self._on_export_pdf, "The photo with the design, as a PDF page"))
         centre.addLayout(bar)
+        centre.addWidget(self.version_bar)
         self.canvas = ImageCanvas()
         self.canvas.pan_with_left_button = False
         self.canvas.set_overlay(self._paint_overlay)
@@ -230,9 +234,24 @@ class DesignWorkspace(Workspace):
         self.filmstrip.refresh()
         if self.session.current != self.key:
             self.load(self.session.current)
+        elif self.key is not None and self.session.active_version(self.key) != self.version:
+            self.switch_version()
         else:
             self._render_base()
         self.setFocus()
+
+    def switch_version(self) -> None:
+        """Show the active version's design over the active version's develop."""
+        self._commit()
+        self.version = self.session.active_version(self.key)
+        self.items = vc.items_from(self.session.recipe(self.key, self.version).vectors)
+        self._show_name()
+        self._refresh_list()
+        self._render_base()
+
+    def _show_name(self) -> None:
+        if self.key is not None:
+            self.frame_label.setText(self.session.display_name(self.key, self.version))
 
     def on_leave(self) -> None:
         self._commit()
@@ -247,17 +266,25 @@ class DesignWorkspace(Workspace):
             self.filmstrip.refresh()
             if topic == topics.CURRENT and self.shell.__dict__.get("_current_index") is not None and self.shell.current_workspace is self and self.session.current != self.key:
                 self.load(self.session.current)
+        elif topic == topics.VERSIONS and self.key is not None:
+            shown = self.shell.__dict__.get("_current_index") is not None and self.shell.current_workspace is self
+            if shown and self.session.active_version(self.key) != self.version:
+                self.switch_version()
+            else:
+                self._show_name()
 
     def load(self, key: str | None) -> None:
         self._commit()
+        self.version_bar.set_photo(key)
         self.key = key
         if key is None:
             self.items, self.source = [], None
             self.canvas.set_image(None)
             self._refresh_list()
             return
-        self.items = vc.items_from(self.session.recipe(key).vectors)
-        self.frame_label.setText(Path(key).name)
+        self.version = self.session.active_version(key)
+        self.items = vc.items_from(self.session.recipe(key, self.version).vectors)
+        self._show_name()
         self._refresh_list()
         path = Path(key)
         self.loader_job.request(lambda: (key, self._open(path)))
@@ -277,7 +304,7 @@ class DesignWorkspace(Workspace):
         """The finished frame without the design, which is drawn live on top."""
         if self.source is None or self.key is None:
             return
-        recipe = self.session.recipe(self.key).copy()
+        recipe = self.session.recipe(self.key, self.version).copy()
         recipe.vectors = []
         source = self.source
         self.renderer.request(lambda: dp.render(source, recipe))
@@ -294,12 +321,12 @@ class DesignWorkspace(Workspace):
     def _commit(self) -> None:
         if self.key is None:
             return
-        recipe = self.session.recipe(self.key)
+        recipe = self.session.recipe(self.key, self.version)
         stored = [vc.item_to_dict(item) for item in self.items]
         if recipe.vectors != stored:
             updated = recipe.copy()
             updated.vectors = stored
-            self.session.set_recipe(self.key, updated)
+            self.session.set_recipe(self.key, updated, self.version)
 
     def _refresh_list(self, select: int | None = None) -> None:
         self.item_list.blockSignals(True)
@@ -525,7 +552,7 @@ class DesignWorkspace(Workspace):
         source = dp.open_source(self.key)
         if source is None:
             return self.size
-        recipe = self.session.recipe(self.key)
+        recipe = self.session.recipe(self.key, self.version)
         probe = dp.apply_geometry(source.data[::8, ::8], recipe.geometry)
         return probe.shape[1] * 8, probe.shape[0] * 8
 
@@ -547,7 +574,7 @@ class DesignWorkspace(Workspace):
         if not path:
             return
         self._commit()
-        recipe = self.session.recipe(self.key).copy()
+        recipe = self.session.recipe(self.key, self.version).copy()
         items, metadata = copy.deepcopy(self.items), self._metadata()
         recipe.vectors = []
         key = self.key
