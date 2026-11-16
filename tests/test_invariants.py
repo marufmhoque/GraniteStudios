@@ -284,3 +284,24 @@ def test_edits_and_marks_survive_reopening_the_folder(harness, before):
     assert w.session.ratings[str(harness.folder / "IMG_0003.jpg")] == 4
     assert str(harness.folder / "IMG_0006.jpg") in w.rejected
     assert_originals_untouched(before, harness.folder)
+
+
+def test_remove_images_and_restore(harness, before, monkeypatch):
+    """Remove Images hides rejected photos from the project; the files,
+    their names and their count on disk never change, and nothing is
+    written beside them (INV-1)."""
+    w = harness.window
+    w.session.set_rejected(w.session.keys()[:3], True)
+    monkeypatch.setattr(type(w.cull), "_confirm_remove", lambda self, n: True)
+    assert w.cull.remove_images() == 3
+    assert_originals_untouched(before, harness.folder)
+    w.session.restore_purged_images()
+    assert_originals_untouched(before, harness.folder)
+
+
+def test_a_project_file_is_never_written_beside_the_photos(harness, before, tmp_path):
+    w = harness.window
+    project = w.create_project("Shoot", harness.folder, tmp_path / "projects")
+    assert project is not None and project.path.parent == tmp_path / "projects"
+    w.save_project()
+    assert_originals_untouched(before, harness.folder)

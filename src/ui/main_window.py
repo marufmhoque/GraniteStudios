@@ -28,7 +28,7 @@ from pathlib import Path
 from PyQt6.QtCore import QObject, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QIcon, QKeySequence, QPixmap, QShortcut
 from PyQt6.QtWidgets import (
-    QApplication, QButtonGroup, QFrame, QHBoxLayout, QLabel, QMainWindow, QMenu, QMessageBox,
+    QApplication, QButtonGroup, QFileDialog, QFrame, QHBoxLayout, QLabel, QMainWindow, QMenu, QMessageBox,
     QPushButton, QStackedWidget, QToolButton, QVBoxLayout, QWidget,
 )
 
@@ -36,6 +36,8 @@ from src.ai_tools.background_removal import BackgroundRemover
 from src.ai_tools.color_engine import ColorEngine
 from src.ai_tools.culling import SmartCull
 from src import __version__
+from src.engine import project_manager as pm
+from src.engine import session as session_topics
 from src.engine import updates
 from src.engine.hardware import get_hardware_summary
 from src.engine.resources import resource_path
@@ -73,6 +75,9 @@ QToolButton#VersionButton {
 }
 QToolButton#VersionButton:hover { color: #ffffff; }
 QToolButton#VersionButton::menu-indicator { image: none; width: 0; }
+QMenuBar { background-color: #121212; color: #c8c8cc; border-bottom: 1px solid #222; }
+QMenuBar::item { padding: 4px 10px; background: transparent; }
+QMenuBar::item:selected { background: #2a2a2a; color: #ffffff; }
 """
 
 class _UpdateSignals(QObject):
@@ -113,6 +118,8 @@ class MainWindow(QMainWindow):
         self.session = LibrarySession()
         self._task_worker: TaskWorker | None = None
         self.available_version: str | None = None
+        self.project: pm.GraniteProject | None = None
+        self._recent: pm.RecentProjects | None = None
         self._update_signals = _UpdateSignals(self)
         self._update_signals.result.connect(self._on_update_result)
 
@@ -120,6 +127,8 @@ class MainWindow(QMainWindow):
         self.status_label.setObjectName("PageSubtitle")
         self.status_label.setWordWrap(True)
         self._build_ui()
+        self._build_menus()
+        self.session.subscribe(self._on_session_for_project)
 
     # -- state the workspaces share, readable as if it were the window's -------- #
     current_folder = _session_field("current_folder")
@@ -244,6 +253,201 @@ class MainWindow(QMainWindow):
         self.update_button.clicked.connect(self._on_update_clicked)
         self.update_button.hide()
         row.addWidget(self.update_button)
+
+    # -- menus ------------------------------------------------------------------- #
+
+    def _build_menus(self) -> None:
+        bar = self.menuBar()
+        file_menu = bar.addMenu("&File")
+        self.new_project_action = file_menu.addAction("New Project\u2026")
+        self.new_project_action.setShortcut(QKeySequence("Ctrl+N"))
+        self.new_project_action.triggered.connect(self.new_project)
+        self.open_project_action = file_menu.addAction("Open Project\u2026")
+        self.open_project_action.setShortcut(QKeySequence("Ctrl+O"))
+        self.open_project_action.triggered.connect(self.open_project_dialog)
+        self.save_project_action = file_menu.addAction("Save Project")
+        self.save_project_action.setShortcut(QKeySequence("Ctrl+S"))
+        self.save_project_action.triggered.connect(self.save_project)
+        self.recent_menu = file_menu.addMenu("Recent Projects")
+        self.recent_menu.aboutToShow.connect(self._fill_recent_menu)
+        file_menu.addSeparator()
+        open_folder = file_menu.addAction("Open Folder Without a Project\u2026")
+        open_folder.triggered.connect(lambda: self.cull._on_load_folder())
+        file_menu.addAction("Show Project Hub\u2026").triggered.connect(self.show_hub)
+        view_menu = bar.addMenu("&View")
+        self.restore_removed_action = view_menu.addAction("Restore Removed Images\u2026")
+        self.restore_removed_action.triggered.connect(self.restore_removed_images)
+
+    def _fill_recent_menu(self) -> None:
+        self.recent_menu.clear()
+        entries = self.recent.entries
+        for entry in entries:
+            action = self.recent_menu.addAction(entry.title + ("" if entry.exists else "  (not found)"))
+            action.setToolTip(entry.path)
+            action.setEnabled(entry.exists)
+            action.triggered.connect(lambda _c=False, p=entry.path: self.open_project(p))
+        if not entries:
+            self.recent_menu.addAction("No recent projects").setEnabled(False)
+        else:
+            self.recent_menu.addSeparator()
+            self.recent_menu.addAction("Clear Recent Projects").triggered.connect(self._clear_recent)
+
+    def _clear_recent(self) -> None:
+        self.recent.entries = []
+        self.recent.save()
+
+    def restore_removed_images(self) -> None:
+        self.switch_to(self.cull)
+        self.cull.restore_removed()
+
+    # -- projects ---------------------------------------------------------------- #
+
+    @property
+    def recent(self) -> pm.RecentProjects:
+        if self._recent is None:
+            self._recent = pm.RecentProjects()
+        return self._recent
+
+    def _update_title(self) -> None:
+        title = f"Granite Studios v{__version__}"
+        self.setWindowTitle(f"{title} \u2014 {self.project.project_name}" if self.project else title)
+
+    def start_up(self) -> None:
+        """At launch: reopen the last project if asked to, else show the hub."""
+        last = self.recent.last()
+        if self.recent.reopen_last and last is not None and self.open_project(last.path):
+            return
+        self.show_hub()
+
+    def show_hub(self) -> None:
+        from src.ui.widgets.welcome_hub import FOLDER, NEW, OPEN, RECENT, WelcomeHub
+
+        hub = WelcomeHub(self.recent, self)
+        if not hub.exec() or hub.choice is None:
+            return
+        action, path = hub.choice
+        if action == NEW:
+            self.new_project()
+        elif action == OPEN:
+            self.open_project_dialog()
+        elif action == RECENT and path:
+            self.open_project(path)
+        elif action == FOLDER:
+            self.cull._on_load_folder()
+
+    def new_project(self, folder=None) -> pm.GraniteProject | None:
+        """Ask for a name, a photo folder and a place; create and open it."""
+        from src.ui.widgets.welcome_hub import NewProjectDialog
+
+        start = folder or (self.session.current_folder if self.project is None else None)
+        dialog = NewProjectDialog(start, parent=self, lock_folder=folder is not None)
+        if not dialog.exec():
+            return None
+        name, photos, location = dialog.values()
+        return self.create_project(name, photos, location)
+
+    def create_project(self, name: str, folder, location=None) -> pm.GraniteProject | None:
+        try:
+            project = pm.create_project(name, folder, location)
+        except pm.ProjectError as exc:
+            QMessageBox.warning(self, "New Project", str(exc))
+            return None
+        return self.project if self.open_project(project.path) else None
+
+    def open_project_dialog(self) -> None:
+        start = pm.default_projects_folder()
+        path, _ = QFileDialog.getOpenFileName(self, "Open Project", str(start if start.exists() else Path.home()),
+                                              "Granite Studios projects (*.granite)")
+        if path:
+            self.open_project(path)
+
+    def open_project(self, path) -> bool:
+        """Open a .granite project: its folder, its removals, where work stopped."""
+        try:
+            project = pm.load_project(path)
+        except pm.ProjectError as exc:
+            QMessageBox.warning(self, "Open Project", str(exc))
+            return False
+        folder = project.folder
+        if folder is None or not folder.is_dir():
+            QMessageBox.warning(self, "Open Project",
+                                f"The photos for {project.project_name} were in {folder}, which can no "
+                                "longer be found. Reconnect the drive, or move the folder back, and try again.")
+            return False
+        self._leave_project()
+        self.cull.open_folder(folder)
+        project.last_opened = pm._now()
+        project.apply_to_session(self.session)
+        self.project = project
+        for workspace in self.workspaces:
+            if workspace.title == project.active_workspace and workspace is not self.cull:
+                self.switch_to(workspace)
+                break
+        self.save_project(quiet=True)
+        self._update_title()
+        self.status_label.setText(f"Opened project {project.project_name}: {self.session.total_images} photos"
+                                  + (f" ({len(self.session.purged)} removed)" if self.session.purged else "") + ".")
+        return True
+
+    def save_project(self, quiet: bool = False) -> bool:
+        """Save the open project; with none open, offer to make one from the
+        open folder."""
+        if self.project is None:
+            if quiet:
+                return False
+            if not self.session.is_open and not self.session.purged:
+                self.status_label.setText("Open a folder or a project first.")
+                return False
+            return self.new_project(folder=self.session.current_folder) is not None
+        try:
+            self.project.save_project(self.session, workspace=self.current_workspace.title)
+        except pm.ProjectError as exc:
+            if not quiet:
+                QMessageBox.warning(self, "Save Project", str(exc))
+            return False
+        keepers = sum(1 for key in self.session.keys() if key not in self.session.rejected)
+        self.recent.remember(self.project, self.session.total_images, keepers, self._project_thumbnail())
+        if not quiet:
+            self.status_label.setText(f"Saved project {self.project.project_name}.")
+        return True
+
+    def _project_thumbnail(self) -> Path | None:
+        """A small JPEG of the selected (or first) photo for the recent list."""
+        keys = self.session.keys()
+        key = self.session.current if self.session.current in keys else (keys[0] if keys else None)
+        pixmap = self.thumbnail_for(key) if key else None
+        if pixmap is None or self.project is None:
+            return None
+        target = self.recent.thumbnail_path(self.project)
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            small = pixmap.scaled(240, 160, Qt.AspectRatioMode.KeepAspectRatio,
+                                  Qt.TransformationMode.SmoothTransformation)
+            return target if small.save(str(target), "JPG", 85) else None
+        except OSError:
+            return None
+
+    def _leave_project(self) -> None:
+        if self.project is not None:
+            self.save_project(quiet=True)
+            self.project = None
+            self._update_title()
+
+    def project_folder_changing(self, folder) -> None:
+        """Cull is about to open ``folder``: a project for another folder ends."""
+        if self.project is None:
+            return
+        current = self.project.folder
+        try:
+            same = current is not None and Path(folder).resolve() == current.resolve()
+        except OSError:
+            same = False
+        if not same:
+            self._leave_project()
+
+    def _on_session_for_project(self, topic: str) -> None:
+        if topic == session_topics.PURGED and self.project is not None:
+            self.save_project(quiet=True)
 
     # -- updates ----------------------------------------------------------------- #
 
@@ -404,6 +608,8 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt naming)
         self.current_workspace.on_leave()
+        if self.project is not None:
+            self.save_project(quiet=True)
         self.session.save_all()
         for workspace in self.workspaces:
             workspace.shutdown()

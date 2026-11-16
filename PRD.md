@@ -65,7 +65,7 @@ workspaces. In summary:
 | Graphics | None | Vector text, shapes, watermarks; SVG and PDF ([FR-17](#fr-17-design-and-vector-graphics)) |
 | Versions | None | Virtual copies with style branches, added in 2.00 ([FR-19](#fr-19-versions-virtual-copies)) |
 | De-blur | Unsharp mask only | Deconvolution of motion and focus blur, added in 2.00 ([FR-20](#fr-20-de-blur-deconvolution)) |
-| Tests | None | **593** pytest tests ([7](#7-quality-and-verification)) |
+| Tests | None | **640** pytest tests ([7](#7-quality-and-verification)) |
 
 ---
 
@@ -419,6 +419,8 @@ Measurements in 1.0 §FR-5 still hold.
 | FR-6.1 | Select all / none / invert | Scoped to visible frames | **Done** |
 | FR-6.2 | Reject, restore, review before acting | | **Done** |
 | FR-6.3 | Rejection is never deletion | | **Done** (INV-1) |
+| FR-6.5 | Remove Images | Shift+Delete or the toolbar: after one confirmation every rejected photo (manual, blur, blinks, duplicates, cull to target) leaves the working set, grid, filmstrips, counts and exports; files untouched; kept in the folder's session file and the project | **Done** — hash-checked in `test_invariants.py` |
+| FR-6.6 | Restore Removed Images | View menu: every removed photo listed with a tick; restored photos return in folder order with ratings, labels, versions and edits, still rejected | **Done** |
 | FR-6.4 | Filter the grid | Keepers, AI picks, duplicates, rejected, blurry, motion, out of focus; and by person | **Done** |
 
 ### FR-7 Develop engine
@@ -431,7 +433,7 @@ Measurements in 1.0 §FR-5 still hold.
 | FR-7.4 | RAW from linear 16-bit | LibRaw to linear sRGB, 16-bit; a measured baseline exposure (0–3 stops, from the frame's median) so an unedited RAW is not dark; embedded preview when LibRaw cannot decode the file, with a note | **Done** |
 | FR-7.5 | Tone | Exposure (linear, ±5 EV), highlight roll-off instead of clipping, highlights, shadows, whites, blacks, contrast, point curves (master and per channel, monotone cubic) | **Done** |
 | FR-7.6 | Presence | Texture, clarity (both on luminance, midtone-weighted), dehaze (dark-channel prior with guided filtering; negative adds haze) | **Done** |
-| FR-7.7 | Colour | Temperature and tint (luminance-preserving gains), vibrance, saturation, 8-band HSL, three-way colour grading with balance and blending | **Done** |
+| FR-7.7 | Colour | Temperature and tint (luminance-preserving gains), vibrance and saturation (luminance-preserving, gamut-limited: −100 is a true black and white), 8-band HSL, three-way colour grading with balance and blending | **Done** — before 2.04 saturation worked in HSV, where −100 turned each colour into its brightest channel (full red became white); edits made earlier with Saturation or Vibrance now render at their true brightness |
 | FR-7.8 | Looks and LUTs | The six 1.0 grades as looks with strength; 3D `.cube` LUTs with domain support and strength; malformed LUTs rejected then ignored | **Done** |
 | FR-7.9 | Detail | Sharpening (amount, radius), noise reduction | **Done** |
 | FR-7.10 | Lens | lensfun profile: distortion and lateral colour (geometry) and vignetting; manual distortion and vignette sliders | **Done** — profile matched by EXIF make, model and lens |
@@ -531,6 +533,8 @@ end. Every workspace was also rendered with real camera files and inspected.
 | FR-16.8 | Heal and clone | Stored as positions and radii; filled at render time | **Done** |
 | FR-16.9 | Inpainting | Fast marching for holes under 24 px; LaMa for larger, in a context window, only the hole replaced | **Done** — LaMa output checked for colour (blue sky stays blue); visual quality on real prints unjudged |
 | FR-16.10 | A failing layer must not lose the picture | Skipped with a reason; the rest of the stack applies | **Done** |
+| FR-16.11 | Color Splash (Isolate Object) | Retouch tool: one click runs `Segmenter.segment_object_at_point` (EfficientSAM-Ti) and adds an adjustment layer of saturation −100 through the **inverted** click mask, feathered 1.5 px at full size; further clicks add to the object (up to six); hide, adjust or un-invert it at any time; stored in the recipe | **Done** — on a real photo one click kept a shirt in colour, three kept the whole player; 7.8 s first render at 1,644 px, ~1 s re-render after a slider change (the selection is cached) |
+| FR-16.12 | Click selections are computed once | A click mask is cached per set of points and size, so re-rendering a stack does not re-run the model | **Done** — before 2.04 every re-render ran EfficientSAM again (4.3 s at 1,600 px) |
 
 **Modules:** `engine/layer_stack.py`, `ai_tools/segmentation.py`,
 `ai_tools/retouch.py`, `ui/workspaces/retouch.py`.
@@ -659,6 +663,24 @@ De-Blur), `ai_tools/segmentation.py` (`Segmenter.face`).
 
 **Verified:** `tests/test_updates.py` (13 tests); the network and process
 launch are replaced in tests.
+
+### FR-22 Projects
+
+*(New in 2.04.)* A named shoot that reopens where work stopped.
+
+| ID | Requirement | Acceptance criteria | Status |
+| --- | --- | --- | --- |
+| FR-22.1 | Project file | `<Name>.granite` JSON: name, created and opened times, source folders, a stable UUID per photo, removed photos, active workspace, selected photo. Written atomically (temporary file, then replace); saved where the user chooses, default `Documents/Granite Studios/Projects` | **Done** |
+| FR-22.2 | Never beside the photos | The project only points at the folder; marks and recipes stay in its `-edit` subfolder, so the folder opened on its own keeps all its work | **Done** (INV-1, tested) |
+| FR-22.3 | Tolerant reading | Damaged JSON, a non-project file, or a project with no folder gives a plain reason; wrong-typed fields fall back to defaults (INV-3) | **Done** |
+| FR-22.4 | Reopen where work stopped | Folder, removed photos (merged with the folder's own record), selected photo and workspace; a missing folder is explained, not guessed | **Done** |
+| FR-22.5 | Recent projects | Title, path, thumbnail proxy, photo and keeper counts, last opened; newest first, at most 12; in `%LOCALAPPDATA%/Granite Studios/recent_projects.json` (Windows) or `~/.config/granite-studios/` (macOS) | **Done** |
+| FR-22.6 | Project Hub | At launch: New Project, Open Existing Project, a folder without a project, the recent list; **Always reopen last active project** skips it | **Done** |
+| FR-22.7 | File menu | New Project (Ctrl+N), Open Project (Ctrl+O), Save Project (Ctrl+S; offers to create one from the open folder), Recent Projects | **Done** |
+| FR-22.8 | One folder per project | `source_directories` is a list, but a project opens its first folder only | **Partial** — several folders per project is not built |
+
+**Module:** `engine/project_manager.py`, `ui/widgets/welcome_hub.py`,
+`ui/main_window.py`. **Verified:** `tests/test_project_manager.py`.
 
 ---
 
@@ -874,7 +896,7 @@ verified whole and unpacked in memory, so no unverified file reaches disk.
 
 ### 7.1 Approach
 
-**593 pytest tests** (592 pass and 1 skips on the development machine, where
+**640 pytest tests** (639 pass and 1 skips on the development machine, where
 the hosted backend's own requirements are not installed). They exercise the
 real engines and the real window — headless, with `QT_QPA_PLATFORM=offscreen`
 — and mock nothing but file dialogs and, in two tests, the network.
@@ -889,11 +911,14 @@ repository, which may sit on a synced drive.
 
 | File | Tests | What it pins |
 | --- | --- | --- |
-| `test_invariants.py` | 24 | INV-1 for every library action; rejected frames never exported; recipes instead of files; reopening a folder |
+| `test_invariants.py` | 26 | INV-1 for every library action (including Remove Images and project files); rejected frames never exported; recipes instead of files; reopening a folder |
 | `test_fast_preview.py` | 74 | Preview paths, orientation, capture time, the exact-decode calibration, JPEG scanning, every sample format, extraction < 25 ms |
 | `test_develop_pipeline.py` | 65 | Identity, tone, colour, HSL, grading, LUTs, presence, strips, preview = export, 16-bit, geometry, lens, formats, RAW baseline and fallback |
 | `test_parametric_recipe.py` | 53 | Round trips, tolerance of bad input, sidecars, INV-7, looks match 1.0 |
 | `test_vector_canvas.py` | 49 | Shapes, text layout and scaling, tokens, snapping, SVG and PDF dimensions, templates |
+| `test_project_manager.py` | 22 | Project create, save, reload, stable IDs, active images, reopening where work stopped, damaged files, recent list, File menu, hub, start-up |
+| `test_purge.py` | 12 | Remove Images: files untouched, set and exports updated, restore with marks and edits, persistence, Cull button, shortcut, restore dialog, filmstrips |
+| `test_color_splash.py` | 11 | One-click layer, recipe round trip, object kept and rest grey at equal brightness, off / inverted / partial, the selection cached, model absent, luminance-preserving saturation, the Retouch tool, export |
 | `test_layer_stack.py` | 47 | Blend-mode values, masks, compositing, pixel layers, through the pipeline |
 | `test_face_mesh_ear.py` | 38 | EAR geometry exactly; open/shut on reference faces; head roll; smile vs open mouth |
 | `test_retouch.py` | 20 | Frequency separation keeps pores; teeth; eyes; inpainting; corner fill; masks |

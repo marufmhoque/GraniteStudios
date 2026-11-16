@@ -28,7 +28,7 @@ import cv2
 import numpy as np
 from PIL import Image
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize, QPropertyAnimation, QEasingCurve
-from PyQt6.QtGui import QPixmap, QImage, QFont, QIcon, QColor, QCursor
+from PyQt6.QtGui import QPixmap, QImage, QFont, QIcon, QColor, QCursor, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -97,6 +97,7 @@ class CullWorkspace(Workspace):
     def __init__(self, shell) -> None:
         super().__init__(shell)
         self.cells: dict[str, ThumbnailCell] = {}
+        self._parked: dict[str, ThumbnailCell] = {}      # removed photos' cells, hidden
         self._thumb_worker: ThumbnailWorker | None = None
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         layout = QVBoxLayout(self)
@@ -109,6 +110,8 @@ class CullWorkspace(Workspace):
     def on_session(self, topic: str) -> None:
         if topic == session_topics.LIBRARY:
             self._rebuild_grid()
+        elif topic == session_topics.PURGED:
+            self._sync_removed()
         elif topic in (session_topics.MARKS, session_topics.RECIPE, session_topics.VERSIONS):
             self._refresh_marks()
         elif topic == session_topics.CURRENT:
@@ -116,6 +119,9 @@ class CullWorkspace(Workspace):
 
     def open_folder(self, folder) -> None:
         """Open a folder through the shared session; every workspace follows."""
+        changing = self.shell.__dict__.get("project") is not None and hasattr(type(self.shell), "project_folder_changing")
+        if changing:
+            self.shell.project_folder_changing(folder)
         if self._thumb_worker is not None:
             self._thumb_worker.cancel()
             self._thumb_worker.wait()
@@ -417,6 +423,18 @@ class CullWorkspace(Workspace):
         )
         self.review_button.clicked.connect(self._on_review_rejects)
         sel_row.addWidget(self.review_button)
+
+        self.remove_button = QPushButton("\U0001F5D1 Remove Images")
+        self.remove_button.setObjectName("SecondaryButton")
+        self.remove_button.setToolTip(
+            "Take every rejected photo out of the project (Shift+Delete). The files stay on "
+            "disk, untouched; View \u25b8 Restore Removed Images brings them back."
+        )
+        self.remove_button.clicked.connect(self.remove_images)
+        sel_row.addWidget(self.remove_button)
+        for keys in ("Shift+Delete", "Shift+Backspace"):
+            QShortcut(QKeySequence(keys), self, activated=self.remove_images,
+                      context=Qt.ShortcutContext.WidgetWithChildrenShortcut)
 
         sel_row.addStretch()
 
@@ -1142,7 +1160,9 @@ class CullWorkspace(Workspace):
 
     def _refresh_reject_button(self) -> None:
         if hasattr(self, "review_button"):
-            self.review_button.setText(f"Review Rejected ({len(self.rejected)})")
+            # Removed photos are out of the project; only count the rest.
+            in_set = sum(1 for key in self.session.keys() if key in self.rejected)
+            self.review_button.setText(f"Review Rejected ({in_set})")
 
     def _on_reject_selected(self) -> None:
         targets = self._selected_paths()
@@ -1264,7 +1284,9 @@ class CullWorkspace(Workspace):
             parts.append(f"{shown} shown")
         parts.append(f"{len(self.selected)} selected")
         if self.rejected:
-            parts.append(f"{len(self.rejected)} rejected")
+            parts.append(f"{len(self.rejected & set(self.session.keys()))} rejected")
+        if self.session.purged:
+            parts.append(f"{len(self.session.purged)} removed")
         if self.edit_folder is not None:
             parts.append(f"edits → {self.edit_folder.name}/")
         self.status_label.setText("  ·  ".join(parts))
@@ -1290,21 +1312,27 @@ class CullWorkspace(Workspace):
             widget = item.widget()
             if widget is not None:
                 widget.deleteLater()
+        for cell in self._parked.values():
+            cell.deleteLater()
         self.cells.clear()
+        self._parked.clear()
 
-        if not self.image_paths:
+        if not self.session.all_paths:
             self.status_label.setText("No supported images found in that folder.")
             return
 
-        columns = max(1, (self.grid_scroll.viewport().width() - 24) // (THUMB_SIZE + 24))
-        for i, path in enumerate(self.image_paths):
+        # Every photo gets a cell, so removing and restoring are instant and
+        # never decode a thumbnail twice. Removed photos' cells wait,
+        # hidden, in ``_parked``.
+        for path in self.session.all_paths:
             cell = ThumbnailCell(str(path))
             cell.clicked.connect(self._on_thumb_clicked)
             cell.opened.connect(self.shell.open_in_develop)
             cell.web_toggled.connect(self._on_web_toggle)
             cell.menu_requested.connect(self._on_cell_menu)
-            self.grid.addWidget(cell, i // columns, i % columns)
-            self.cells[str(path)] = cell
+            self.grid.addWidget(cell, 0, 0)
+            (self._parked if str(path) in self.session.purged else self.cells)[str(path)] = cell
+        self._layout_cells()
         self._refresh_marks()
         self._show_current()
         from src.ai_tools import person_clustering
@@ -1314,7 +1342,7 @@ class CullWorkspace(Workspace):
         self._refresh_people()
 
         self.progress.setVisible(True)
-        self.progress.setMaximum(len(self.image_paths))
+        self.progress.setMaximum(len(self.session.all_paths))
         self.progress.setValue(0)
         # Say plainly where edits will land. The folder is created here, not
         # on first export, so it is visible in Explorer straight away.
@@ -1324,7 +1352,7 @@ class CullWorkspace(Workspace):
             f"— your originals are never modified."
         )
 
-        self._thumb_worker = ThumbnailWorker(self.loader, list(self.image_paths), parent=self)
+        self._thumb_worker = ThumbnailWorker(self.loader, list(self.session.all_paths), parent=self)
         self._thumb_worker.thumb_ready.connect(self._on_thumb_ready)
         self._thumb_worker.meta_ready.connect(self._on_meta_ready)
         self._thumb_worker.progress.connect(self._on_thumb_progress)
@@ -1333,13 +1361,13 @@ class CullWorkspace(Workspace):
         self.setFocus()
 
     def _on_thumb_ready(self, path: str, pixmap: QPixmap) -> None:
-        cell = self.cells.get(path)
+        cell = self.cells.get(path) or self._parked.get(path)
         if cell is not None:
             cell.set_pixmap(pixmap)
 
     def _on_meta_ready(self, path: str, metadata: object) -> None:
         self.metadata[path] = metadata  # type: ignore[assignment]
-        cell = self.cells.get(path)
+        cell = self.cells.get(path) or self._parked.get(path)
         if cell is not None:
             cell.set_metadata(metadata)  # type: ignore[arg-type]
             cell.set_tech_visible(self.tech_info_check.isChecked())
@@ -1350,6 +1378,85 @@ class CullWorkspace(Workspace):
     def _on_thumbs_done(self) -> None:
         self.progress.setVisible(False)
         self._refresh_status()
+
+    # -- removing photos from the project --------------------------------------- #
+
+    def _layout_cells(self) -> None:
+        """Place the working set's cells in folder order; hide the removed."""
+        for cell in list(self.cells.values()) + list(self._parked.values()):
+            self.grid.removeWidget(cell)
+        columns = max(1, (self.grid_scroll.viewport().width() - 24) // (THUMB_SIZE + 24))
+        for index, path in enumerate(self.image_paths):
+            cell = self.cells.get(str(path))
+            if cell is not None:
+                self.grid.addWidget(cell, index // columns, index % columns)
+        for cell in self._parked.values():
+            cell.setVisible(False)
+        self._apply_view_filter()
+
+    def _sync_removed(self) -> None:
+        """Follow the session after photos were removed or restored."""
+        for key in [k for k in self.cells if k in self.session.purged]:
+            self._parked[key] = self.cells.pop(key)
+        for key in [k for k in self._parked if k not in self.session.purged]:
+            self.cells[key] = self._parked.pop(key)
+        self.cells = {str(p): self.cells[str(p)] for p in self.image_paths if str(p) in self.cells}
+        self._layout_cells()
+
+    def removed_thumbnail(self, key: str):
+        cell = self._parked.get(key)
+        pixmap = cell.pixmap() if cell is not None else None
+        return pixmap if pixmap is not None and not pixmap.isNull() else None
+
+    def _confirm_remove(self, count: int) -> bool:
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("Remove Images")
+        box.setText(f"Remove {count} culled/rejected image{'s' if count != 1 else ''} from the project?")
+        box.setInformativeText(
+            "They leave the grid, the filmstrips and every export. The original files stay "
+            "safe on disk, untouched, with their ratings and edits. View \u25b8 Restore Removed "
+            "Images brings them back at any time.")
+        remove = box.addButton("Remove from Project", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(remove)
+        box.exec()
+        return box.clickedButton() is remove
+
+    def remove_images(self) -> int:
+        """Remove Images: take every rejected photo out of the working set."""
+        if not self.session.is_open and not self.session.purged:
+            return 0
+        count = sum(1 for key in self.session.keys() if key in self.rejected)
+        if not count:
+            self.status_label.setText("No rejected images to remove.")
+            return 0
+        if not self._confirm_remove(count):
+            return 0
+        removed = self.session.purge_rejected_images()
+        self.status_label.setText(
+            f"Showing {self.session.total_images} keepers ({len(self.session.purged)} culled photo"
+            f"{'s' if len(self.session.purged) != 1 else ''} removed). The files are untouched; "
+            f"View \u25b8 Restore Removed Images brings them back.")
+        return removed
+
+    def restore_removed(self) -> int:
+        """Restore Removed Images: choose removed photos to bring back."""
+        from src.ui.widgets.restore_removed import RestoreRemovedDialog
+
+        removed = [str(p) for p in self.session.purged_paths()]
+        if not removed:
+            self.status_label.setText("No removed images to restore.")
+            return 0
+        dialog = RestoreRemovedDialog(removed, self.removed_thumbnail, self)
+        if not dialog.exec():
+            return 0
+        restored = self.session.restore_purged_images(dialog.chosen())
+        if restored:
+            self.status_label.setText(
+                f"Restored {restored} photo{'s' if restored != 1 else ''}. They are still marked "
+                "rejected; press P or use Keep Selected to keep them.")
+        return restored
 
     def _on_apply_label(self) -> None:
         targets = self._selected_paths()

@@ -1,6 +1,6 @@
 # Granite Studios
 
-**Current version: v2.03**
+**Current version: v2.04**
 
 ### [⬇️ Download the installer](https://github.com/marufmhoque/GraniteStudios/releases/latest/download/Install-GraniteStudios.bat)
 
@@ -51,8 +51,9 @@ Six workspaces over one folder: **Cull**, **Develop**, **Retouch**, **Design**, 
 | Cull | Sharpness on the faces, blink and smile from a 478-point mesh, duplicate and burst grouping, cull to a target count, survey and face loupe, group by person, ratings and labels written to `.xmp` |
 | Develop | 32-bit float engine: tone, curves, 8-band HSL, colour grading, dehaze, lens profiles, `.cube` LUTs, straighten, keystone, copy and sync settings, clipping view |
 | De-blur | True deconvolution of motion smear and missed focus (Richardson-Lucy, Wiener, optional NAFNet), auto-detected angle and length, subject- or face-only |
+| Projects | Named `.granite` projects that reopen where you stopped, a Project Hub of recent projects at launch, and **Remove Images** to clear rejected photos out of the project without touching the files |
 | Versions | Virtual copies of any photo: independent edits that share the original's pixels, one-click Cinematic / Warm Analog / Clean B&W branches, side-by-side compare, every version exported as its own file |
-| Retouch | Layers (7 blend modes), AI masks (subject, skin, teeth, eyes, iris, lips; hair and sky approximate), click-to-select, healing, cloning, frequency-separation skin smoothing, teeth and eyes, neural inpainting |
+| Retouch | Layers (7 blend modes), AI masks (subject, skin, teeth, eyes, iris, lips; hair and sky approximate), click-to-select, one-click Color Splash, healing, cloning, frequency-separation skin smoothing, teeth and eyes, neural inpainting |
 | Design | Vector text, shapes and bezier paths; watermark templates filled from each photo's EXIF; snapping and guides; SVG and PDF output |
 | Export | Web, full-size, 16-bit TIFF, print and 16-bit PNG presets; Instagram sets; panoramic reel; static web gallery; transparent-background PNG |
 | Video | Trim, speed, reverse, time-lapse, reframe, stabilise, crop, redact, concat, transitions, loudness, colour and LUTs; bundled FFmpeg |
@@ -77,7 +78,7 @@ Six workspaces over one folder: **Cull**, **Develop**, **Retouch**, **Design**, 
 - Straightening: under **1 degree** residual from scene lines, **0.6 degree** mean from the body when there are no lines
 - Background removal **1.36 times faster** on DirectML than CPU
 - De-blurring recovers **+5.2 dB** on a synthetic 10 px motion smear; a full-quality pass takes about **4 s** on the 1,600 px preview and **66 s** on a 24 MP export (a fast Wiener pass follows the slider in about 150 ms)
-- **593 automated tests** against real engines, 20,300 lines of application code and 5,600 lines of tests
+- **640 automated tests** against real engines, 20,300 lines of application code and 5,600 lines of tests
 
 **What it cannot do yet** (full list with reasons in [PRD.md](PRD.md) section 8):
 
@@ -92,8 +93,8 @@ Six workspaces over one folder: **Cull**, **Develop**, **Retouch**, **Design**, 
 
 | Where | Keys |
 | --- | --- |
-| Anywhere | **Ctrl+1 to Ctrl+6** switch workspace |
-| Cull | Arrows move; **1-5** stars (0 clears); **6-9** red, yellow, green, blue; **P** pick; **X** reject; **U** clear; **S** survey; **F** face loupe; **Ctrl+'** new version; **Enter** open in Develop |
+| Anywhere | **Ctrl+1 to Ctrl+6** switch workspace; **Ctrl+N** new project; **Ctrl+O** open project; **Ctrl+S** save project |
+| Cull | Arrows move; **1-5** stars (0 clears); **6-9** red, yellow, green, blue; **P** pick; **X** reject; **U** clear; **S** survey; **F** face loupe; **Ctrl+'** new version; **Shift+Delete** remove rejected images; **Enter** open in Develop |
 | Develop | Left/Right change frame; **[ / ]** change version; **V** compare versions (**Shift+V** picks which); **\\** before/after; **J** clipping; **Ctrl+Z / Ctrl+Y** undo, redo; **Ctrl+Shift+C / V** copy, paste settings; **0** fit; **1** 100% |
 
 **Where to go next:** [Quick Start](#quick-start) to install, [Features](#features) for every control, [Architecture Highlights](#architecture-highlights) for how edits are stored, and [PRD.md](PRD.md) for every requirement with its evidence.
@@ -247,6 +248,14 @@ filmstrip along the bottom.
 - **Select All / None / Invert**, scoped to whatever the view filter is showing
 - **Rejected never means deleted.** The original file is never moved, renamed or removed; it is simply left out of every export
 - **Review Rejected** shows every rejected frame before anything is acted on, with a tick per photo to put it back
+- **Remove Images** (Shift+Delete) clears every rejected photo out of the project after one confirmation: it leaves the grid, the filmstrips, every count and every export, and the status bar says how many keepers remain. The files stay on disk exactly as they were. **View ▸ Restore Removed Images** lists them with a tick each and brings them back with their ratings and edits
+
+### Projects
+- **File ▸ New Project** (Ctrl+N) names a shoot, points it at its folder and saves a small `<Name>.granite` file, by default in *Documents/Granite Studios/Projects*. It only points at the photos; nothing is written beside them
+- A project reopens where you stopped: the workspace, the selected photo and the removed images. Ratings, rejects and edits stay in the folder's `-edit` subfolder as always, so the folder opened on its own still shows all the work
+- **The Project Hub** at launch has New Project, Open Existing Project, and your recent projects with a thumbnail, photo and keeper counts and when each was last opened. Tick **Always reopen last active project on startup** to skip it
+- **File ▸ Open Project** (Ctrl+O), **Save Project** (Ctrl+S; with no project open it offers to make one from the open folder) and **Recent Projects**. Projects also save themselves on close and after removing or restoring images
+- A project holds one folder for now (the file format already allows several)
 - **Show:** filters the grid to *Keepers*, *AI picks*, *Duplicates*, *Rejected*, *Blurry*, *Motion blur* or *Out of focus*, and to one person after **Group by Person**
 
 ### Develop
@@ -279,6 +288,7 @@ Sharpening lifts edges that survived. **De-Blur** (Develop ▸ Detail) undoes th
 ### Retouch
 - **Layers** with opacity and seven blend modes (normal, multiply, screen, overlay, soft light, colour dodge, luminosity), shown in a panel you can reorder and hide
 - **Adjustment layers** limited by a mask: **AI** (subject, background, person, skin, teeth, eyes, iris, lips; hair and sky are approximate and labelled so), **click-to-select** an object, a **gradient**, or one you **paint** with the brush
+- **Color Splash** (Isolate Object): pick the tool and click an object. It stays in colour and everything else turns black and white, at its own brightness. Click again to add more of the object (a shirt, then the shorts, then a sock), untick the layer to turn it off, lower its Saturation for a partial effect, or tick off **Invert mask** to swap: the object grey, the rest in colour. It is an ordinary adjustment layer in the recipe, so nothing is fixed until export
 - **Heal** removes blemishes and dust with a click; **Clone** copies a patch from one place to another. Both are stored as positions, so they render at full resolution on export
 - **Smooth Skin** evens out blotches while keeping pores (frequency separation, measured on the texture bands); **Whiten Teeth** takes out the yellow without making them glow; **Brighten Eyes** adds clarity to the irises
 
@@ -351,9 +361,9 @@ RAM is profiled at startup and batch work is sized so it never starves the syste
 ## Usage Workflow
 
 ### 1. Cull
-- **Load Folder** (top right). A `<FolderName>-edit` subfolder is created for everything the app writes
+- **New Project** from the Project Hub (or **Load Folder**, top right, to work without one). A `<FolderName>-edit` subfolder is created for everything the app writes
 - **Select Top N** with *Skip blinks* to pick keepers, or **Run Smart Cull** to star the best of each burst. Rate and label with the keyboard; **Survey** and **Face Loupe** to compare
-- **Reject Non-Picks**, then **Review Rejected** to check before anything is left out
+- **Reject Non-Picks**, then **Review Rejected** to check before anything is left out, then **Remove Images** to clear the rejects out of the project
 
 ### 2. Develop and retouch
 - Double-click a frame (or press **Enter**) to open it in **Develop**; arrow keys move through the folder
@@ -409,7 +419,7 @@ python tests/fetch_media.py   # optional: CC0 camera RAW samples and reference f
 pytest
 ```
 
-**593 tests.** They drive the real engines and the real window (headless,
+**640 tests.** They drive the real engines and the real window (headless,
 with `QT_QPA_PLATFORM=offscreen`); nothing is mocked except file dialogs.
 Tests that need a downloaded model or sample file are marked `model` or
 `media` and skip themselves when it is absent.

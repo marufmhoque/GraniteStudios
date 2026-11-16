@@ -17,6 +17,16 @@ beside the originals.
 "Rejected" keeps the meaning it has always had: the frame is left out of
 everything that is exported. The file itself is never moved or deleted.
 
+Removed photos
+--------------
+**Remove Images** (:meth:`LibrarySession.purge_rejected_images`) takes the
+rejected photos out of the working set: the grid, the filmstrips, every
+count and every export stop seeing them. It is the strongest form of
+"rejected", and still only a mark: the files stay exactly where they are
+(INV-1), and a removed photo keeps its rating, labels, versions and edits,
+so :meth:`restore_purged_images` brings it back as it was. ``all_paths`` is
+everything in the folder; ``image_paths`` is what remains in the set.
+
 Versions
 --------
 A photograph can have several independent edits (see parametric_recipe,
@@ -47,6 +57,7 @@ COLOR_LABELS = ("Red", "Yellow", "Green", "Blue", "Purple")
 # What each kind of change is called when listeners are told about it.
 SELECTION, MARKS, LIBRARY, RECIPE, CURRENT = "selection", "marks", "library", "recipe", "current"
 VERSIONS = "versions"           # a version was made, renamed, removed or switched to
+PURGED = "purged"               # photos were removed from, or restored to, the working set
 
 MASTER = pr.MASTER
 MASTER_NAME = "Master"
@@ -69,7 +80,9 @@ class LibrarySession:
     def __init__(self) -> None:
         self.current_folder: Path | None = None
         self.edit_folder: Path | None = None
-        self.image_paths: list[Path] = []
+        self.all_paths: list[Path] = []            # every photo in the folder
+        self.image_paths: list[Path] = []          # the working set: all_paths less the removed
+        self.purged: set[str] = set()              # removed from the working set; files untouched
         self.selected: set[str] = set()
         self.rejected: set[str] = set()
         self.picks: set[str] = set()
@@ -107,16 +120,18 @@ class LibrarySession:
         self.save_all()
         self.current_folder = Path(folder)
         self.edit_folder = loader.get_edit_folder(self.current_folder)
-        self.image_paths = loader.scan_folder(self.current_folder)
-        for store in (self.selected, self.rejected, self.picks, self.web_selected, self._dirty):
+        self.all_paths = loader.scan_folder(self.current_folder)
+        self.image_paths = list(self.all_paths)
+        for store in (self.selected, self.rejected, self.picks, self.web_selected, self._dirty, self.purged):
             store.clear()
         for store in (self.ratings, self.color_labels, self.labels, self.metadata,
                       self.blur_reports, self._recipes, self._copies, self._active):
             store.clear()
         self.last_cull_frames = []
         self.people = None
-        self.current = str(self.image_paths[0]) if self.image_paths else None
         self.load_state()
+        self._apply_purge()
+        self.current = str(self.image_paths[0]) if self.image_paths else None
         self.notify(LIBRARY)
         return len(self.image_paths)
 
@@ -126,6 +141,68 @@ class LibrarySession:
 
     def keys(self) -> list[str]:
         return [str(p) for p in self.image_paths]
+
+    @property
+    def total_images(self) -> int:
+        """Photos in the working set (removed ones are not counted)."""
+        return len(self.image_paths)
+
+    # -- removing photos from the working set ------------------------------------ #
+
+    def _apply_purge(self) -> None:
+        known = {str(p) for p in self.all_paths}
+        self.purged &= known
+        self.image_paths = [p for p in self.all_paths if str(p) not in self.purged]
+
+    def purged_paths(self) -> list[Path]:
+        """The removed photos, in folder order."""
+        return [p for p in self.all_paths if str(p) in self.purged]
+
+    def purge_rejected_images(self) -> int:
+        """Remove every rejected photo from the working set. Returns how many.
+
+        Whatever rejected them (a manual reject, blur triage, blinks,
+        duplicates, a cull to a target) they leave the grid, the filmstrips
+        and every export. Nothing on disk changes: the files stay where they
+        are and every mark and edit is kept, so :meth:`restore_purged_images`
+        undoes it exactly.
+        """
+        return self.purge(key for key in self.keys() if key in self.rejected)
+
+    def purge(self, paths) -> int:
+        """Remove ``paths`` from the working set (see
+        :meth:`purge_rejected_images`). Returns how many were removed."""
+        active = set(self.keys())
+        targets = [key for key in dict.fromkeys(str(p) for p in paths) if key in active]
+        if not targets:
+            return 0
+        self.purged.update(targets)
+        self.selected.difference_update(targets)
+        self._apply_purge()
+        self.save_state()
+        self.notify(PURGED)
+        if self.current in self.purged:
+            self.current = None
+            self.set_current(self.image_paths[0] if self.image_paths else None)
+        self.notify(MARKS)
+        return len(targets)
+
+    def restore_purged_images(self, paths=None) -> int:
+        """Put removed photos back (all of them, or ``paths``). Returns how
+        many. They come back as they were: still rejected, with their
+        ratings, labels, versions and edits."""
+        targets = self.purged if paths is None else {str(p) for p in paths} & self.purged
+        count = len(targets)
+        if not count:
+            return 0
+        self.purged = set() if paths is None else self.purged - targets
+        self._apply_purge()
+        self.save_state()
+        self.notify(PURGED)
+        if self.current is None and self.image_paths:
+            self.set_current(self.image_paths[0])
+        self.notify(MARKS)
+        return count
 
     # -- selection and the current frame ----------------------------------- #
 
@@ -396,6 +473,7 @@ class LibrarySession:
             "rejected": sorted(name(k) for k in self.rejected),
             "picks": sorted(name(k) for k in self.picks),
             "web": sorted(name(k) for k in self.web_selected),
+            "purged": sorted(name(k) for k in self.purged),
             "ratings": {name(k): v for k, v in sorted(self.ratings.items())},
             "colors": {name(k): v for k, v in sorted(self.color_labels.items())},
             "labels": {name(k): v for k, v in sorted(self.labels.items())},
@@ -405,7 +483,8 @@ class LibrarySession:
                 for k, copies in sorted(self._copies.items()) if copies
             },
         }
-        empty = not any(state[k] for k in ("rejected", "picks", "web", "ratings", "colors", "labels", "versions"))
+        empty = not any(state[k] for k in ("rejected", "picks", "web", "purged", "ratings", "colors",
+                                           "labels", "versions"))
         try:
             if empty:
                 if path.exists():
@@ -421,7 +500,7 @@ class LibrarySession:
     def load_state(self) -> None:
         """Read saved marks. A missing or damaged file leaves everything unmarked."""
         path = self._state_path()
-        by_name = {p.name: str(p) for p in self.image_paths}
+        by_name = {p.name: str(p) for p in self.all_paths}
         if path is None or not path.exists():
             self._load_versions({}, by_name)
             return
@@ -443,6 +522,7 @@ class LibrarySession:
             return {by_name[n]: v for n, v in raw.items() if n in by_name} if isinstance(raw, dict) else {}
 
         self.rejected, self.picks, self.web_selected = keys("rejected"), keys("picks"), keys("web")
+        self.purged = keys("purged")
         self.ratings = {
             k: int(v) for k, v in mapping("ratings").items() if isinstance(v, int) and 1 <= v <= 5
         }

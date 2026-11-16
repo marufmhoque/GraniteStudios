@@ -6,6 +6,8 @@ Tools (left rail), used with the left mouse button; the middle button pans:
     Clone    first click picks the source, later clicks stamp it
     Brush    paint the selected layer's mask (hold Alt to erase)
     Select   click an object to select it with the AI model
+    Color Splash  click an object to keep it in colour and turn the rest
+             black and white (Isolate Object); click again to add to it
 
 Every tool writes to a layer in the frame's recipe, never to pixels. Heal
 spots and clone stamps are stored as positions, so they render at full
@@ -40,7 +42,7 @@ from src.ui.workspaces.base import Workspace
 logger = logging.getLogger(__name__)
 
 PREVIEW_SIDE = 1600
-TOOLS = ("heal", "clone", "brush", "select")
+TOOLS = ("heal", "clone", "brush", "select", "splash")
 AI_KINDS = ("subject", "background", "person", "skin", "teeth", "eyes", "iris", "lips", "hair", "sky")
 ADJUST = (("exposure", "Exposure", -3.0, 3.0, 0.05, 2), ("contrast", "Contrast", -100, 100, 1, 0),
           ("saturation", "Saturation", -100, 100, 1, 0), ("temperature", "Temperature", -100, 100, 1, 0),
@@ -95,6 +97,8 @@ class RetouchWorkspace(Workspace):
             ("clone", "Clone", "Click once to pick a source, then click to stamp it"),
             ("brush", "Brush", "Paint the selected layer's mask; Alt erases"),
             ("select", "Select", "Click an object to select it with the AI model"),
+            ("splash", "Color Splash", "Isolate Object: click an object to keep it in colour and turn "
+                                       "everything else black and white. Click again to add more of it."),
         )):
             button = QRadioButton(label)
             button.setToolTip(tip)
@@ -196,7 +200,10 @@ class RetouchWorkspace(Workspace):
         self.invert = QCheckBox("Invert mask")
         self.invert.toggled.connect(lambda c: (self._set_mask("invert", c), self._commit()))
         props.add(self.invert)
-        self.feather = SliderRow("Feather", 0, 10, 0, 0.1, 1)
+        # Percent of the long edge; two decimals so a pixel-scale edge (a
+        # Color Splash's 1.5 px) shows and survives a nudge.
+        self.feather = SliderRow("Feather", 0, 10, 0, 0.01, 2)
+        self.feather.setToolTip("Softness of the mask's edge, in percent of the frame's long edge")
         self.feather.changed.connect(lambda v: self._set_mask("feather", v / 100.0))
         self.feather.released.connect(self._commit)
         props.add(self.feather)
@@ -544,6 +551,8 @@ class RetouchWorkspace(Workspace):
                              "hardness": self.brush_hardness.value() / 100.0, "erase": erase}]
         elif tool == "select":
             self._click_select(x, y)
+        elif tool == "splash":
+            self._color_splash(x, y)
 
     def _on_drag(self, x: float, y: float) -> None:
         self._cursor = (x, y)
@@ -589,6 +598,41 @@ class RetouchWorkspace(Workspace):
                                         mask=layer_stack.Mask(kind="ai", params={"kind": "click",
                                                                                  "points": [[x, y]]})))
         self.status_label.setText("Selecting… Click again to add to the selection.")
+
+    def _color_splash(self, x: float, y: float) -> None:
+        """Isolate Object: the clicked object keeps its colour, the rest goes
+        black and white. A further click while a Color Splash layer is
+        selected adds that spot to the object instead of starting again."""
+        from src.ai_tools import model_store
+        from src.ai_tools.segmentation import SAM_SPEC
+
+        if not model_store.is_cached(SAM_SPEC):
+            def ready() -> None:
+                self._segmenter, self._context = None, None
+                self._color_splash(x, y)
+            self.shell.with_models([SAM_SPEC], "Color Splash", ready, self.ai_button)
+            return
+        layer = self._selected_layer()
+        if layer_stack.is_color_splash(layer):
+            points = list(layer.mask.params.get("points", []))
+            if len(points) >= 6:
+                self.status_label.setText("A Color Splash holds six clicks. Start another with a new layer.")
+                return
+
+            def change(l):
+                l.mask.params = {**l.mask.params, "points": points + [[round(x, 5), round(y, 5)]]}
+            self._update_selected(change)
+            self._commit()
+            self.status_label.setText("Adding to the object in colour…")
+            return
+        source = self.source
+        # The feather is 1.5 px on the full-size photo; the preview is a
+        # reduced copy (``scale`` < 1), so its long edge is scaled back up.
+        long_edge = max(source.size) / (source.scale or 1.0) if source is not None else 1600.0
+        self._add(layer_stack.color_splash_layer(x, y, long_edge))
+        self.status_label.setText(
+            "Color Splash: finding the object… It stays in colour and the rest turns black and white. "
+            "Click it again to add more of it; tick Invert mask to swap, or untick the layer to turn it off.")
 
     # -- overlay ---------------------------------------------------------------------- #
 

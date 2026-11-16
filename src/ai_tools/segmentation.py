@@ -417,6 +417,14 @@ class Segmenter:
         full = cv2.resize(chosen.astype(np.float32), (w, h), interpolation=cv2.INTER_LINEAR)
         return MaskResult(full, "click-to-select", None if full.max() > 0.5 else "nothing was selected there")
 
+    def segment_object_at_point(self, rgb: np.ndarray, x: float, y: float) -> MaskResult:
+        """The whole object under one point, ``(x, y)`` in pixels of ``rgb``.
+
+        EfficientSAM-Ti picks the object; this is :meth:`click` with a single
+        point, the entry point for one-click tools such as Color Splash.
+        """
+        return self.click(rgb, [(x, y)])
+
     # -- face-derived masks ------------------------------------------------ #
 
     def faces(self, rgb: np.ndarray) -> list[FaceRegions] | None:

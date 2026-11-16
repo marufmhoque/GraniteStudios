@@ -121,6 +121,9 @@ def main() -> int:
     # thread; nothing is sent). Here rather than in the window, so tests and
     # the installer's start-up check never touch the network.
     window.check_for_updates_if_due()
+    # Reopen the last project, or show the Project Hub. Here rather than in
+    # the window, so tests and the installer's start-up check never see it.
+    window.start_up()
 
     return app.exec()
 

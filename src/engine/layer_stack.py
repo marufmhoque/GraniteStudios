@@ -195,6 +195,42 @@ def layer_to_dict(layer: Layer) -> dict:
     return dataclasses.asdict(layer)
 
 
+# --------------------------------------------------------------------- #
+# Color Splash
+# --------------------------------------------------------------------- #
+
+SPLASH_TOOL = "color_splash"
+SPLASH_NAME = "Color Splash"
+SPLASH_SATURATION = -100.0
+SPLASH_FEATHER_PX = 1.5        # on the full-size frame
+
+
+def color_splash_layer(x: float, y: float, long_edge_px: float) -> Layer:
+    """Keep the object at ``(x, y)`` (fractions of the frame) in colour and
+    turn everything else black and white.
+
+    It is an ordinary adjustment layer: saturation -100 through the
+    *inverted* click-to-select mask of that object, feathered
+    :data:`SPLASH_FEATHER_PX` pixels at full size. So it can be hidden,
+    adjusted (partial saturation, exposure), inverted back (the object grey,
+    the rest in colour), or grown with more clicks, and nothing is
+    rasterised until export.
+    """
+    feather = SPLASH_FEATHER_PX / max(float(long_edge_px), 1.0)
+    return Layer(
+        kind="adjustment",
+        name=SPLASH_NAME,
+        recipe={"basic": {"saturation": SPLASH_SATURATION}},
+        mask=Mask(kind="ai", params={"kind": "click", "points": [[round(x, 5), round(y, 5)]]},
+                  invert=True, feather=feather),
+        params={"tool": SPLASH_TOOL},
+    )
+
+
+def is_color_splash(layer: Layer | None) -> bool:
+    return layer is not None and layer.kind == "adjustment" and layer.params.get("tool") == SPLASH_TOOL
+
+
 def layers_from_recipe(recipe) -> list[Layer]:
     """The usable layers of a recipe, bottom first."""
     found = (layer_from_dict(item) for item in getattr(recipe, "layers", []) or [])
@@ -252,6 +288,21 @@ class RenderContext:
             result = self.segmenter.mask(rgb8, kind)
             if result.note and result.is_empty:
                 self.note(f"{kind} mask: {result.note}")
+            self._masks[key] = result.mask
+        return self._masks[key]
+
+    def click_mask(self, rgb8: np.ndarray, points, exclude=()) -> np.ndarray:
+        """The object under clicked points, remembered per set of points.
+
+        Click-to-select takes seconds, and a stack is re-rendered on every
+        slider release, so the mask is worked out once for each set of
+        points at each size, as the named masks are.
+        """
+        key = ("click", tuple(map(tuple, points)), tuple(map(tuple, exclude)), rgb8.shape)
+        if key not in self._masks:
+            result = self.segmenter.click(rgb8, points, exclude)
+            if result.note and result.is_empty:
+                self.note(f"click selection: {result.note}")
             self._masks[key] = result.mask
         return self._masks[key]
 
@@ -322,7 +373,7 @@ def render_mask(mask: Mask, image: np.ndarray, ctx: RenderContext) -> np.ndarray
                 return None
             points = [(x * w, y * h) for x, y in (_point(q, (0.5, 0.5)) for q in p.get("points", []))]
             exclude = [(x * w, y * h) for x, y in (_point(q, (0.5, 0.5)) for q in p.get("exclude", []))]
-            result = ctx.segmenter.click(rgb8, points, exclude).mask
+            result = ctx.click_mask(rgb8, points, exclude)
         else:
             found = ctx.ai_mask(rgb8, str(kind))
             if found is None:

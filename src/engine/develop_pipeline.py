@@ -705,13 +705,37 @@ def _presence_stage(encoded: np.ndarray, recipe: Recipe, ctx: Context, rows: sli
     return encoded + delta[:, :, None]
 
 
+def _saturate(encoded: np.ndarray, vibrance: float, saturation: float) -> np.ndarray:
+    """Vibrance and saturation, keeping each pixel's luminance.
+
+    Each pixel moves along the line between its own grey (its Rec. 709
+    luma) and its colour, so -100 saturation gives a true black-and-white
+    image. Doing this in HSV instead, as before 2.04, turned colours into
+    their brightest channel: full red became white. Boosts stop at the edge
+    of the gamut, so a strong colour does not clip into a different hue.
+    Vibrance scales by how muted a pixel is, so skin and pastels move more
+    than colours that are already vivid.
+    """
+    luma = np.clip(encoded @ LUMA, 0.0, 1.0)[:, :, None]
+    chroma = encoded - luma
+    factor = np.float32(1.0 + saturation / 100.0)
+    if vibrance:
+        high = encoded.max(axis=2)
+        low = encoded.min(axis=2)
+        muted = 1.0 - np.clip((high - low) / np.maximum(high, 1e-6), 0.0, 1.0)
+        factor = factor * (1.0 + (vibrance / 100.0) * muted)[:, :, None]
+    factor = np.broadcast_to(np.asarray(factor, np.float32), luma.shape)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        room = np.where(chroma > 1e-6, (1.0 - luma) / chroma,
+                        np.where(chroma < -1e-6, luma / -chroma, np.inf)).min(axis=2, keepdims=True)
+    factor = np.where(factor > 1.0, np.minimum(factor, np.maximum(room, 1.0)), np.maximum(factor, 0.0))
+    return (luma + chroma * factor).astype(np.float32)
+
+
 def _colour_stage(encoded: np.ndarray, recipe: Recipe, ctx: Context) -> np.ndarray:
     """HSL bands, vibrance, saturation, colour grading, look and LUT."""
     b = recipe.basic
-    needs_hsv = (
-        ctx.hue_shift is not None or ctx.hue_saturation is not None
-        or ctx.hue_luminance is not None or b.vibrance or b.saturation
-    )
+    needs_hsv = ctx.hue_shift is not None or ctx.hue_saturation is not None or ctx.hue_luminance is not None
     if needs_hsv:
         hsv = cv2.cvtColor(np.clip(encoded, 0.0, 1.0), cv2.COLOR_RGB2HSV)
         hue, sat, val = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
@@ -727,12 +751,11 @@ def _colour_stage(encoded: np.ndarray, recipe: Recipe, ctx: Context) -> np.ndarr
             sat = sat * (1.0 + look(ctx.hue_saturation) * colourful)
         if ctx.hue_shift is not None:
             hue = (hue + look(ctx.hue_shift) * colourful) % 360.0
-        if b.vibrance:
-            sat = sat * (1.0 + (b.vibrance / 100.0) * (1.0 - sat))
-        if b.saturation:
-            sat = sat * (1.0 + b.saturation / 100.0)
         hsv = np.stack([hue, np.clip(sat, 0.0, 1.0), np.clip(val, 0.0, 1.0)], axis=-1).astype(np.float32)
         encoded = cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)
+
+    if b.vibrance or b.saturation:
+        encoded = _saturate(encoded, b.vibrance, b.saturation)
 
     grade = recipe.grade
     wheels = (grade.shadows, grade.midtones, grade.highlights)

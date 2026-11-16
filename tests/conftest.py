@@ -126,6 +126,13 @@ def library(tmp_path: Path) -> Path:
     return folder
 
 
+@pytest.fixture(autouse=True)
+def _private_app_state(tmp_path_factory, monkeypatch):
+    """Recent projects and the default projects folder go to a temporary
+    folder, so no test reads or writes the real user's."""
+    monkeypatch.setenv("GRANITE_STUDIOS_HOME", str(tmp_path_factory.mktemp("app-state")))
+
+
 @pytest.fixture(scope="session")
 def qapp():
     from PyQt6.QtWidgets import QApplication
