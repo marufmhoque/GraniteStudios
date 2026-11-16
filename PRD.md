@@ -65,7 +65,7 @@ workspaces. In summary:
 | Graphics | None | Vector text, shapes, watermarks; SVG and PDF ([FR-17](#fr-17-design-and-vector-graphics)) |
 | Versions | None | Virtual copies with style branches, added in 2.00 ([FR-19](#fr-19-versions-virtual-copies)) |
 | De-blur | Unsharp mask only | Deconvolution of motion and focus blur, added in 2.00 ([FR-20](#fr-20-de-blur-deconvolution)) |
-| Tests | None | **580** pytest tests ([7](#7-quality-and-verification)) |
+| Tests | None | **593** pytest tests ([7](#7-quality-and-verification)) |
 
 ---
 
@@ -215,7 +215,10 @@ names its enforcement and its test.
 The desktop application sends **no user data** anywhere.
 
 - **Enforcement:** `src/ai_tools/model_store.py` is the only network client
-  in the photo pipeline, and it only downloads.
+  in the photo pipeline, and it only downloads. The only other one is
+  `src/engine/updates.py` ([FR-21](#fr-21-updates)), which downloads one
+  version string from GitHub at most once a day, sends nothing but the
+  request, and can be turned off.
 - **Face data:** identity embeddings for grouping by person are biometric
   data. They are computed only from the open folder, stored only in its edit
   subfolder, never compared against anything outside it, and deleted by
@@ -637,6 +640,26 @@ De-Blur), `ai_tools/segmentation.py` (`Segmenter.face`).
 
 **Verified:** `tests/test_deblur.py` (58 tests).
 
+### FR-21 Updates
+
+*(New in 2.01.)* The installed app finds and installs newer versions itself.
+
+| ID | Requirement | Acceptance criteria | Status |
+| --- | --- | --- | --- |
+| FR-21.1 | Version check | Reads `__version__` from `src/__init__.py` on GitHub's `main` (`raw.githubusercontent.com`), generic User-Agent, 5 s timeout; any failure is "no update", silently | **Done** |
+| FR-21.2 | Once a day, optional | Runs at startup in the background when 24 h have passed; **Check Automatically at Startup** turns it off (`~/.granitestudios/updates.json`); never runs when a window is merely constructed (tests, installer smoke test) | **Done** |
+| FR-21.3 | Offer, not force | A newer version shows **Update to vX.YY** in the top bar; the version menu has **Check for Updates Now** | **Done** |
+| FR-21.4 | One-click update | Confirms, starts `Update Granite Studios.bat` with `GRANITE_RELAUNCH=1`, closes the app (saving the session); the installer waits up to 30 s for it to exit and reopens it when done | **Done** |
+| FR-21.5 | Local updater | The installer copies the one-file bootstrap into the install folder and adds **Start Menu > Update Granite Studios**; each update refreshes it | **Done** |
+| FR-21.6 | No needless download | The bootstrap compares the installed and GitHub versions first; when current it says so and asks before reinstalling | **Done** |
+| FR-21.7 | Dev copies stay put | Only a copy in `%LOCALAPPDATA%\Granite Studios` with the updater beside it updates itself; a checkout or packaged build opens the download page instead | **Done** |
+
+**Module:** `engine/updates.py`, `ui/main_window.py`, `install/install.ps1`,
+`install/Install-GraniteStudios.bat`.
+
+**Verified:** `tests/test_updates.py` (13 tests); the network and process
+launch are replaced in tests.
+
 ---
 
 ## 5. Non-functional requirements
@@ -851,7 +874,7 @@ verified whole and unpacked in memory, so no unverified file reaches disk.
 
 ### 7.1 Approach
 
-**580 pytest tests** (579 pass and 1 skips on the development machine, where
+**593 pytest tests** (592 pass and 1 skips on the development machine, where
 the hosted backend's own requirements are not installed). They exercise the
 real engines and the real window — headless, with `QT_QPA_PLATFORM=offscreen`
 — and mock nothing but file dialogs and, in two tests, the network.
@@ -877,6 +900,7 @@ repository, which may sit on a synced drive.
 | `test_workspaces.py` | 21 | Every workspace driven end to end |
 | `test_versions.py` | 21 | Versions: settings-only copies, independence, names, persistence, styles, UI, export |
 | `test_deblur.py` | 58 | PSFs, 4.5 dB regression, damping, clamping, boundaries, tiling, estimators, preview = export, masks, model absence, Develop end to end |
+| `test_updates.py` | 13 | Version comparison, GitHub reply parsing and failures, daily check and its off switch, dev copies never self-update, updater launch with relaunch, window button and menu, installer updater wiring |
 | `test_version_and_icon.py` | 10 | Two-decimal version agreed by every copy and published in the README, +0.01 bumps, the update check, the square multi-size .ico, shortcut icon repair |
 | `test_phone_media.py` | 18 | Live/Motion Photos, gain-map arithmetic, 10-bit HEIC, metadata |
 | `test_culling_score.py` | 16 | Keeper score arithmetic, composition, region sharpness, the mesh in a cull |

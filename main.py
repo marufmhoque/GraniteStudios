@@ -117,6 +117,10 @@ def main() -> int:
 
     window.show()
     splash.finish(window)
+    # Once a day, ask GitHub whether a newer version exists (off the UI
+    # thread; nothing is sent). Here rather than in the window, so tests and
+    # the installer's start-up check never touch the network.
+    window.check_for_updates_if_due()
 
     return app.exec()
 

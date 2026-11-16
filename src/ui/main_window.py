@@ -21,18 +21,22 @@ button.
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from pathlib import Path
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QObject, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QIcon, QKeySequence, QPixmap, QShortcut
 from PyQt6.QtWidgets import (
-    QApplication, QButtonGroup, QFrame, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
-    QPushButton, QStackedWidget, QVBoxLayout, QWidget,
+    QApplication, QButtonGroup, QFrame, QHBoxLayout, QLabel, QMainWindow, QMenu, QMessageBox,
+    QPushButton, QStackedWidget, QToolButton, QVBoxLayout, QWidget,
 )
 
 from src.ai_tools.background_removal import BackgroundRemover
 from src.ai_tools.color_engine import ColorEngine
 from src.ai_tools.culling import SmartCull
+from src import __version__
+from src.engine import updates
 from src.engine.hardware import get_hardware_summary
 from src.engine.resources import resource_path
 from src.engine.session import LibrarySession
@@ -64,7 +68,17 @@ QPushButton#SectionHeader {
 }
 QPushButton#SectionHeader:hover { background: #232323; }
 QFrame#StatusBar { background-color: #141414; border-top: 1px solid #2a2a2a; }
+QToolButton#VersionButton {
+    background: transparent; border: none; color: #6a6b72; font-size: 11px; padding: 4px 10px;
+}
+QToolButton#VersionButton:hover { color: #ffffff; }
+QToolButton#VersionButton::menu-indicator { image: none; width: 0; }
 """
+
+class _UpdateSignals(QObject):
+    """Carries an update check's answer from its thread to the window."""
+    result = pyqtSignal(object, bool)     # (version on GitHub or None, asked by hand)
+
 
 # Workspaces whose controls older callers may reach for, in lookup order.
 _DELEGATES = ("cull", "export", "develop", "retouch", "design", "video")
@@ -98,6 +112,9 @@ class MainWindow(QMainWindow):
         self.ig_formatter = IgFormatter(loader=self.loader)
         self.session = LibrarySession()
         self._task_worker: TaskWorker | None = None
+        self.available_version: str | None = None
+        self._update_signals = _UpdateSignals(self)
+        self._update_signals.result.connect(self._on_update_result)
 
         self.status_label = QLabel("No folder loaded. Click “Load Folder” to begin.")
         self.status_label.setObjectName("PageSubtitle")
@@ -184,6 +201,7 @@ class MainWindow(QMainWindow):
         engine = QLabel(f"Engine: {hw['tier']}")
         engine.setStyleSheet("color: #6a6b72; font-size: 11px; padding-right: 12px;")
         row.addWidget(engine)
+        self._build_version_controls(row)
         self.load_button = QPushButton("Load Folder")
         self.load_button.setObjectName("ActionButton")
         self.load_button.clicked.connect(lambda: self.cull._on_load_folder())
@@ -200,6 +218,95 @@ class MainWindow(QMainWindow):
 
         self.nav_buttons[0].setChecked(True)
         self._current_index = 0
+
+    def _build_version_controls(self, row: QHBoxLayout) -> None:
+        """The version, with a menu to check for updates, and a button that
+        appears when GitHub has a newer one."""
+        self.version_button = QToolButton()
+        self.version_button.setObjectName("VersionButton")
+        self.version_button.setText(f"v{__version__}")
+        self.version_button.setToolTip("Granite Studios version. Click to check for updates.")
+        self.version_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        menu = QMenu(self.version_button)
+        check_now = menu.addAction("Check for Updates Now")
+        check_now.triggered.connect(lambda: self.check_for_updates(manual=True))
+        self.auto_update_action = menu.addAction("Check Automatically at Startup")
+        self.auto_update_action.setCheckable(True)
+        self.auto_update_action.setChecked(updates.load_prefs()["auto_check"])
+        self.auto_update_action.setToolTip("Once a day, read the latest version number from GitHub. "
+                                           "Nothing is sent.")
+        self.auto_update_action.toggled.connect(self._on_auto_update)
+        self.version_button.setMenu(menu)
+        row.addWidget(self.version_button)
+
+        self.update_button = QPushButton("Update")
+        self.update_button.setObjectName("ActionButton")
+        self.update_button.clicked.connect(self._on_update_clicked)
+        self.update_button.hide()
+        row.addWidget(self.update_button)
+
+    # -- updates ----------------------------------------------------------------- #
+
+    def check_for_updates(self, manual: bool = True) -> None:
+        """Ask GitHub for the latest version on a background thread."""
+        if manual:
+            self.status_label.setText("Checking GitHub for a newer version\u2026")
+        signals = self._update_signals
+
+        def work() -> None:
+            version = updates.latest_version()
+            prefs = updates.load_prefs()
+            prefs["last_check"] = time.time()
+            updates.save_prefs(prefs)
+            try:
+                signals.result.emit(version, manual)
+            except RuntimeError:          # the window closed meanwhile
+                pass
+
+        threading.Thread(target=work, name="update-check", daemon=True).start()
+
+    def check_for_updates_if_due(self) -> None:
+        """The startup check: at most once a day, and only if it is on."""
+        if updates.check_due(updates.load_prefs()):
+            self.check_for_updates(manual=False)
+
+    def _on_update_result(self, version, manual: bool) -> None:
+        if updates.is_newer(version):
+            self.available_version = version
+            self.update_button.setText(f"Update to v{version}")
+            self.update_button.setToolTip(f"You have v{__version__}. Install v{version} from GitHub.")
+            self.update_button.show()
+            if manual:
+                self.status_label.setText(f"Version v{version} is available: click Update to v{version}.")
+        elif manual:
+            self.status_label.setText(
+                f"You have the latest version (v{__version__})." if version
+                else "Could not reach GitHub to check for updates. Check your connection and try again.")
+
+    def _on_auto_update(self, checked: bool) -> None:
+        prefs = updates.load_prefs()
+        prefs["auto_check"] = bool(checked)
+        updates.save_prefs(prefs)
+
+    def _on_update_clicked(self) -> None:
+        version = self.available_version or "the latest version"
+        if not updates.can_self_update():
+            updates.launch_update()
+            self.status_label.setText("Opened the installer download in your browser. Run it to update.")
+            return
+        answer = QMessageBox.question(
+            self, "Update Granite Studios",
+            f"Granite Studios will close, install v{version} and reopen.\n\n"
+            "Your photos and edits are untouched.")
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            started = updates.launch_update()
+        except OSError as exc:
+            QMessageBox.warning(self, "Update Granite Studios", f"The updater could not start: {exc}")
+            return
+        if started:
+            self.close()
 
     # -- navigation ---------------------------------------------------------------- #
 

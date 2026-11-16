@@ -223,15 +223,28 @@ foreach ($item in $required) {
 
 # A running copy holds its files open, so replacing them fails with a
 # confusing "being used by another process" error. Check first and say so.
-if (Test-Path $InstallDir) {
-    $running = @()
+function Get-RunningApp {
+    $found = @()
     foreach ($name in @('pythonw', 'python')) {
         foreach ($proc in (Get-Process $name -ErrorAction SilentlyContinue)) {
             $exePath = $null
             try { $exePath = $proc.Path } catch { }
             if ($exePath -and $exePath.StartsWith($InstallDir, 'OrdinalIgnoreCase')) {
-                $running += $proc
+                $found += $proc
             }
+        }
+    }
+    return ,$found
+}
+if (Test-Path $InstallDir) {
+    $running = Get-RunningApp
+    if ($running.Count -gt 0) {
+        # The app's Update button closes the app as it starts this; give it
+        # time to save and exit before deciding it is still open.
+        Say 'Waiting for Granite Studios to close...'
+        for ($i = 0; $i -lt 30 -and $running.Count -gt 0; $i++) {
+            Start-Sleep -Seconds 1
+            $running = Get-RunningApp
         }
     }
     if ($running.Count -gt 0) {
@@ -348,7 +361,7 @@ if (-not (Test-Path $iconIco) -and (Test-Path $iconPng)) {
 }
 $icon     = if (Test-Path $iconIco) { $iconIco } else { $null }
 # The version, as src/__init__.py states it, for Settings > Apps.
-$AppVersion = '2.00'
+$AppVersion = '2.01'
 $initPy = Join-Path $InstallDir 'src\__init__.py'
 if (Test-Path $initPy) {
     $m = Select-String -Path $initPy -Pattern '__version__\s*=\s*"([^"]+)"' | Select-Object -First 1
@@ -367,6 +380,21 @@ foreach ($dir in @($desktop, $startMenu)) {
     New-AppShortcut (Join-Path $dir "$AppName.lnk") $launcher "`"$mainPy`"" $InstallDir $icon
 }
 Ok 'Shortcuts created.'
+
+# --------------------------------------------------------------- Updater ----
+# Keep a copy of the one-file installer beside the app, so updating never
+# needs a trip to GitHub: the app's Update button and Start Menu > Update
+# Granite Studios both run it. It checks GitHub's version first and
+# downloads only when there is something newer. Each update refreshes it.
+$bootstrapSrc = Join-Path $SourceDir 'install\Install-GraniteStudios.bat'
+$updaterBat   = Join-Path $InstallDir 'Update Granite Studios.bat'
+if (Test-Path -LiteralPath $bootstrapSrc) {
+    Copy-Item -LiteralPath $bootstrapSrc -Destination $updaterBat -Force
+    New-AppShortcut (Join-Path $startMenu 'Update Granite Studios.lnk') $updaterBat '' $InstallDir $icon
+    Ok 'Updater added (Start Menu > Update Granite Studios).'
+} else {
+    Warn 'The updater was not found in the download; update by running the installer again.'
+}
 
 # The app itself also offers to make a shortcut on first run; this marker
 # tells it not to, since the installer has already done a better job.
@@ -454,5 +482,14 @@ Say "Installed to: $InstallDir"
 Say "To remove it: Settings > Apps > $AppName (or run Uninstall Granite Studios.bat there)."
 Say "Install log: $LogPath"
 Write-Host ''
+if ($env:GRANITE_RELAUNCH -eq '1') {
+    # Started from the app's Update button, which closed the app: reopen it.
+    Say 'Reopening Granite Studios...'
+    try {
+        Start-Process -FilePath $launcher -ArgumentList "`"$mainPy`"" -WorkingDirectory $InstallDir
+    } catch {
+        Warn 'Could not reopen it; start it from the Desktop shortcut.'
+    }
+}
 Stop-Logging
 exit 0

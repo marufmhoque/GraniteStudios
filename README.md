@@ -1,6 +1,6 @@
 # Granite Studios
 
-**Current version: v2.00**
+**Current version: v2.01**
 
 ### [⬇️ Download the installer](https://github.com/marufmhoque/GraniteStudios/releases/latest/download/Install-GraniteStudios.bat)
 
@@ -38,7 +38,7 @@ Six workspaces over one folder: **Cull**, **Develop**, **Retouch**, **Design**, 
 | Promise | What it means in practice |
 | --- | --- |
 | **Originals are never touched** | Files in your folder are never modified, moved, renamed or deleted. "Reject" only leaves a frame out of exports. A test hashes every original before and after every action |
-| **Your photos never leave your computer** | No upload, no account, no telemetry. The only network use is downloading AI models (each one asks first) and the installer itself |
+| **Your photos never leave your computer** | No upload, no account, no telemetry. The only network use is downloading AI models (each one asks first), the installer itself, and a once-a-day check of the latest version number on GitHub (nothing is sent; turn it off from the version menu) |
 | **Edits are settings, not pictures** | Each frame's edit is a small `.granite.json` file in the `-edit` folder. Change or undo anything, any time; nothing is rendered until you export |
 | **It degrades, it does not guess** | A missing model, an unreadable file or a damaged settings file switches that feature off or opens the photo unedited, and says so. It never invents a result |
 | **It does not claim what it has not measured** | Every figure here comes from a recorded run, and the README says what each one does and does not show |
@@ -77,7 +77,7 @@ Six workspaces over one folder: **Cull**, **Develop**, **Retouch**, **Design**, 
 - Straightening: under **1 degree** residual from scene lines, **0.6 degree** mean from the body when there are no lines
 - Background removal **1.36 times faster** on DirectML than CPU
 - De-blurring recovers **+5.2 dB** on a synthetic 10 px motion smear; a full-quality pass takes about **4 s** on the 1,600 px preview and **66 s** on a 24 MP export (a fast Wiener pass follows the slider in about 150 ms)
-- **580 automated tests** against real engines, 20,300 lines of application code and 5,600 lines of tests
+- **593 automated tests** against real engines, 20,300 lines of application code and 5,600 lines of tests
 
 **What it cannot do yet** (full list with reasons in [PRD.md](PRD.md) section 8):
 
@@ -107,9 +107,25 @@ Six workspaces over one folder: **Cull**, **Develop**, **Retouch**, **Design**, 
 3. Launch Granite Studios from the Desktop shortcut or the Start Menu.
 
 That single file is all you need — it downloads the app itself, so there is no
-repository to clone and nothing else to fetch. **Run it again whenever you want
-to update**: it pulls the latest version and installs over the old one, leaving
-your photos and `-edit` folders alone.
+repository to clone and nothing else to fetch. You only download it once.
+
+### Updating
+
+You never need to come back to GitHub to update:
+
+- **In the app.** Once a day Granite Studios reads the latest version number
+  from GitHub. When there is a newer one, an **Update to v2.xx** button appears
+  in the top bar. Click it: the app saves and closes, the update installs, and
+  the app reopens by itself. The version in the top bar (for example `v2.01`)
+  opens a menu with **Check for Updates Now** and **Check Automatically at
+  Startup** (untick it to stop the daily check; nothing is ever sent).
+- **From the Start Menu.** **Update Granite Studios** runs the same updater.
+  It compares your version with GitHub's first: if you are already current it
+  says so and downloads nothing; otherwise it installs the newer version.
+
+Updates install over the old version and leave your photos and `-edit`
+folders alone. Installs from before v2.01 do not have the updater yet: run
+the downloaded installer one more time to get it.
 
 The download link always serves the current version — a GitHub Action
 re-publishes it on every change to `main`, and the file fetches `main` when it
@@ -393,7 +409,7 @@ python tests/fetch_media.py   # optional: CC0 camera RAW samples and reference f
 pytest
 ```
 
-**580 tests.** They drive the real engines and the real window (headless,
+**593 tests.** They drive the real engines and the real window (headless,
 with `QT_QPA_PLATFORM=offscreen`); nothing is mocked except file dialogs.
 Tests that need a downloaded model or sample file are marked `model` or
 `media` and skip themselves when it is absent.

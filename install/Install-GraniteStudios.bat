@@ -34,6 +34,13 @@ if %EXITCODE% NEQ 0 (
   echo   This window stays open so you can read the error above.
   echo   Send that log file along if you want help with it.
 )
+REM Started from the app's Update button: on success the app reopens by
+REM itself, so close this window instead of waiting for a key.
+if "%GRANITE_RELAUNCH%"=="1" if %EXITCODE% EQU 0 (
+  echo   Granite Studios is reopening...
+  timeout /t 3 /nobreak >nul
+  exit /b 0
+)
 echo.
 echo   Press any key to close...
 pause >nul
@@ -83,6 +90,55 @@ function BootstrapFail ($message, $detail) {
     try { Start-Process notepad.exe -ArgumentList $logPath -ErrorAction SilentlyContinue } catch { }
     exit 1
 }
+
+# --- Is there anything to update? --------------------------------------- #
+# Compare the installed version with the one on GitHub before downloading
+# anything. Any failure here just means "install as usual".
+$InstallDir     = Join-Path $env:LOCALAPPDATA 'Granite Studios'
+$versionPattern = '__version__\s*=\s*"(\d+\.\d{2})"'
+$installed = $null
+$latest    = $null
+try {
+    $initPy = Join-Path $InstallDir 'src\__init__.py'
+    if (Test-Path -LiteralPath $initPy) {
+        $m = [regex]::Match((Get-Content -LiteralPath $initPy -Raw), $versionPattern)
+        if ($m.Success) { $installed = $m.Groups[1].Value }
+    }
+} catch { }
+try {
+    $reply = Invoke-WebRequest -Uri "https://raw.githubusercontent.com/$Repo/$Branch/src/__init__.py" `
+                               -UseBasicParsing -TimeoutSec 20
+    $m = [regex]::Match([string]$reply.Content, $versionPattern)
+    if ($m.Success) { $latest = $m.Groups[1].Value }
+} catch {
+    LogLine "version check failed: $($_.Exception.Message)"
+}
+LogLine "installed: $installed  latest on GitHub: $latest"
+
+if ($latest -and $installed -and ([decimal]$installed -ge [decimal]$latest)) {
+    Ok "You already have the latest version (v$installed)."
+    if ($env:GRANITE_RELAUNCH -eq '1') {
+        # Started from the app's Update button, which closed the app: reopen it.
+        $pyw = Join-Path $InstallDir 'venv\Scripts\pythonw.exe'
+        if (Test-Path -LiteralPath $pyw) {
+            Start-Process -FilePath $pyw -ArgumentList ('"' + (Join-Path $InstallDir 'main.py') + '"') `
+                          -WorkingDirectory $InstallDir
+        }
+        exit 0
+    }
+    $answer = Read-Host '  Reinstall it anyway? [y/N]'
+    if ($answer -notmatch '^\s*(y|yes)\s*$') {
+        Say 'Nothing to do.'
+        exit 0
+    }
+} elseif ($latest -and $installed) {
+    Say "Updating v$installed -> v$latest."
+} elseif ($latest -and (Test-Path -LiteralPath $InstallDir)) {
+    Say "Updating to v$latest."
+} elseif ($latest) {
+    Say "Installing v$latest."
+}
+Write-Host ''
 
 $work = Join-Path $env:TEMP ("GraniteStudios-setup-" + [guid]::NewGuid().ToString('N').Substring(0,8))
 New-Item -ItemType Directory -Path $work -Force | Out-Null

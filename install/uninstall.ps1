@@ -20,7 +20,7 @@ if ($answer -notmatch '^[Yy]') { Write-Host '  Cancelled.'; exit 0 }
 Write-Host ''
 foreach ($dir in @((Join-Path $env:USERPROFILE 'Desktop'),
                    (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs'))) {
-    foreach ($name in @("$AppName.lnk", 'Granite_Studios.lnk')) {
+    foreach ($name in @("$AppName.lnk", 'Update Granite Studios.lnk', 'Granite_Studios.lnk')) {
         $lnk = Join-Path $dir $name
         if (Test-Path $lnk) { Remove-Item $lnk -Force; Write-Host "  removed $name" }
     }
