@@ -299,14 +299,24 @@ Write-Host ''
 # output from a native command, and pip is by far the likeliest step to fail,
 # so relying on the transcript alone would lose exactly the detail that
 # matters. Abort folds this file into the main log.
-& $VenvPy -m pip install --upgrade pip --quiet --disable-pip-version-check --log $PipLog
+#
+# pip writes warnings to stderr ("Skipping onnxruntime as it is not
+# installed"), and under 'Stop' Windows PowerShell 5.1 turns any native
+# stderr into a terminating error -- even with 2>$null. That aborted every
+# update of an install that already had the DirectML runtime. So the
+# preference is relaxed for these calls and pip is judged by its exit code.
+$prevEA = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+& $VenvPy -m pip install --upgrade pip --quiet --disable-pip-version-check --log $PipLog *> $null
 # 2.0 moved Windows to the DirectML build of ONNX Runtime. Both builds install
 # into the same 'onnxruntime' folder, so an upgrade that left the old one in
 # place would have two packages fighting over the same files. Removing it is
 # a no-op on a fresh install.
-& $VenvPy -m pip uninstall -y onnxruntime --quiet --disable-pip-version-check --log $PipLog 2>$null
+& $VenvPy -m pip uninstall -y onnxruntime --quiet --disable-pip-version-check --log $PipLog *> $null
 & $VenvPy -m pip install -r (Join-Path $InstallDir 'requirements.txt') --disable-pip-version-check --log $PipLog
-if ($LASTEXITCODE -ne 0) {
+$pipCode = $LASTEXITCODE
+$ErrorActionPreference = $prevEA
+if ($pipCode -ne 0) {
     Write-Host ''
     Say 'Dependency installation failed. The pip output above says why; the'
     Say 'usual causes are a dropped internet connection or a package that'
@@ -320,8 +330,12 @@ Ok 'Dependencies installed.'
 # The background-removal model (~170MB) otherwise downloads on first use and
 # makes that first click look frozen. Failure here is not fatal.
 Say 'Fetching the background-removal AI model...'
-& $VenvPy -c "from rembg import new_session; new_session()" 2>$null | Out-Null
-if ($LASTEXITCODE -eq 0) { Ok 'AI model ready.' } else { Warn 'Model will download on first use instead.' }
+$prevEA = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+& $VenvPy -c "from rembg import new_session; new_session()" *> $null
+$rembgOk = ($LASTEXITCODE -eq 0)
+$ErrorActionPreference = $prevEA
+if ($rembgOk) { Ok 'AI model ready.' } else { Warn 'Model will download on first use instead.' }
 
 # Face detector and face mesh for blink and smile detection (~4MB, checksum-pinned). Optional.
 Say 'Fetching the face models (for blink and smile detection, about 4MB)...'
@@ -361,7 +375,7 @@ if (-not (Test-Path $iconIco) -and (Test-Path $iconPng)) {
 }
 $icon     = if (Test-Path $iconIco) { $iconIco } else { $null }
 # The version, as src/__init__.py states it, for Settings > Apps.
-$AppVersion = '2.01'
+$AppVersion = '2.02'
 $initPy = Join-Path $InstallDir 'src\__init__.py'
 if (Test-Path $initPy) {
     $m = Select-String -Path $initPy -Pattern '__version__\s*=\s*"([^"]+)"' | Select-Object -First 1

@@ -1,6 +1,6 @@
 # Granite Studios
 
-**Current version: v2.01**
+**Current version: v2.02**
 
 ### [⬇️ Download the installer](https://github.com/marufmhoque/GraniteStudios/releases/latest/download/Install-GraniteStudios.bat)
 
