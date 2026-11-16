@@ -152,4 +152,10 @@ def test_the_installer_keeps_an_updater_and_reopens_the_app():
     assert "Update Granite Studios.bat" in install and "Update Granite Studios.lnk" in install
     assert "GRANITE_RELAUNCH" in install and "Waiting for Granite Studios to close" in install
     assert "/src/__init__.py" in bootstrap and "You already have the latest version" in bootstrap
+    # Run from the install folder it relaunches from TEMP, since the update
+    # replaces it mid-run; and no answer at all counts as "no".
+    assert 'call "%TEMP%\GraniteStudios-update.bat"' in bootstrap
+    assert "[string](Read-Host" in bootstrap
+    attributes = (ROOT / ".gitattributes").read_text(encoding="utf-8")
+    assert "*.bat text eol=crlf" in attributes and "*.ps1 text eol=crlf" in attributes
     assert updates.VERSION_URL.endswith("/main/src/__init__.py")

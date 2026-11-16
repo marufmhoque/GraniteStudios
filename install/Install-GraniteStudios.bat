@@ -9,6 +9,17 @@ REM
 REM  Re-run it any time to update an existing install to the latest version.
 REM =====================================================================
 
+REM Run from the install folder (Start Menu > Update Granite Studios, or the
+REM app's Update button), this file is replaced by the update it starts, and
+REM cmd reads a batch file as it runs, so it would carry on reading garbage.
+REM Run a copy from TEMP instead. The block is parsed whole before it runs.
+if /i "%~dp0"=="%LOCALAPPDATA%\Granite Studios\" if not "%GRANITE_UPDATER_COPY%"=="1" (
+  copy /y "%~f0" "%TEMP%\GraniteStudios-update.bat" >nul
+  set "GRANITE_UPDATER_COPY=1"
+  call "%TEMP%\GraniteStudios-update.bat"
+  exit /b
+)
+
 setlocal
 title Install Granite Studios
 
@@ -126,7 +137,9 @@ if ($latest -and $installed -and ([decimal]$installed -ge [decimal]$latest)) {
         }
         exit 0
     }
-    $answer = Read-Host '  Reinstall it anyway? [y/N]'
+    # No answer at all (input closed) is $null, and "$null -notmatch" is
+    # false; as a string it is '' and means no, like pressing Enter.
+    $answer = [string](Read-Host '  Reinstall it anyway? [y/N]')
     if ($answer -notmatch '^\s*(y|yes)\s*$') {
         Say 'Nothing to do.'
         exit 0

@@ -1,0 +1,5 @@
+# Windows scripts keep Windows line endings everywhere, including in the zip
+# GitHub serves to the installer: cmd.exe misreads batch files with bare LF.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
