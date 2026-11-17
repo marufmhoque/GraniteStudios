@@ -375,7 +375,7 @@ if (-not (Test-Path $iconIco) -and (Test-Path $iconPng)) {
 }
 $icon     = if (Test-Path $iconIco) { $iconIco } else { $null }
 # The version, as src/__init__.py states it, for Settings > Apps.
-$AppVersion = '2.05'
+$AppVersion = '2.06'
 $initPy = Join-Path $InstallDir 'src\__init__.py'
 if (Test-Path $initPy) {
     $m = Select-String -Path $initPy -Pattern '__version__\s*=\s*"([^"]+)"' | Select-Object -First 1

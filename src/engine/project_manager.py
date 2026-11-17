@@ -20,6 +20,16 @@ Audit trail
 keepers starred", "Removed 1,200 culled photos"), and ``stage_status``
 which workflow stages are done. :func:`workflow_checklist` turns them, with
 the session, into the checklist the History drawer shows.
+
+Settings
+--------
+A project can be renamed (:meth:`GraniteProject.rename_project`), its file
+moved (:meth:`GraniteProject.relocate_project_file`) and a photo folder that
+moved on disk found again (:meth:`GraniteProject.relink_source_folder`). All
+three go through :meth:`GraniteProject.apply_changes`, which checks
+everything first, writes the project file once and puts the project back as
+it was if anything fails. Only the project file, the recent list and the
+app's own ``-edit`` folder are touched: never the photos (INV-1).
 """
 
 from __future__ import annotations
@@ -29,6 +39,8 @@ import logging
 import os
 import platform
 import re
+import shutil
+import subprocess
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -60,6 +72,64 @@ class ProjectError(Exception):
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _same_file(a: Path, b: Path) -> bool:
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return False
+
+
+def _rebase(path: str, bases: list[Path], new: Path) -> str | None:
+    """``path`` moved from under one of ``bases`` to under ``new``, or
+    None when it was not under any of them."""
+    for base in bases:
+        try:
+            relative = Path(path).relative_to(base)
+        except ValueError:
+            continue
+        return str(new / relative)
+    return None
+
+
+def _adopt_edit_folder(old: Path, new: Path) -> None:
+    """Make the app's ``-edit`` folder (recipes, marks, history, layer
+    files) belong to a relinked photo folder.
+
+    It is named for its photo folder, so a folder that moved under a new
+    name carries ``<old>-edit`` with it and must find it called
+    ``<new>-edit``. If the old folder is still there, its edit folder is
+    copied across instead. The photos are never touched, and nothing the
+    new folder already has is replaced.
+    """
+    wanted = new / f"{new.name}-edit"
+    if wanted.exists():
+        return
+    carried = new / f"{old.name}-edit"
+    if carried.is_dir():
+        carried.rename(wanted)
+        return
+    original = old / f"{old.name}-edit"
+    if original.is_dir():
+        shutil.copytree(original, wanted)
+
+
+def reveal_in_file_manager(path: str | Path) -> bool:
+    """Show a file in Explorer or Finder (the folder, elsewhere)."""
+    path = Path(path)
+    system = platform.system()
+    try:
+        if system == "Windows":
+            subprocess.Popen(["explorer", f"/select,{path}"])
+        elif system == "Darwin":
+            subprocess.Popen(["open", "-R", str(path)])
+        else:
+            subprocess.Popen(["xdg-open", str(path.parent)])
+    except OSError as exc:
+        logger.warning("Could not open the file manager: %s", exc)
+        return False
+    return True
 
 
 def make_entry(stage: str, description: str, when: str | None = None) -> dict:
@@ -178,6 +248,129 @@ class GraniteProject:
             session.set_current(self.last_selected_image)
         elif session.current in session.purged:
             session.set_current(session.image_paths[0] if session.image_paths else None)
+
+    # -- settings: rename, move, relink ------------------------------------------- #
+
+    def verify_media_accessibility(self) -> tuple[bool, list[Path]]:
+        """``(is_valid, missing)``: whether every photo folder exists and
+        can be read, and the ones that cannot."""
+        missing = [Path(d) for d in self.source_directories
+                   if not (Path(d).is_dir() and os.access(d, os.R_OK))]
+        return not missing, missing
+
+    def _state(self) -> dict:
+        return {
+            "project_name": self.project_name, "path": self.path,
+            "source_directories": list(self.source_directories),
+            "image_manifest": dict(self.image_manifest),
+            "purged_paths": list(self.purged_paths),
+            "last_selected_image": self.last_selected_image,
+        }
+
+    def _restore(self, state: dict) -> None:
+        for key, value in state.items():
+            setattr(self, key, value)
+
+    def _relink(self, old_folder: str | Path, new_folder: str | Path) -> tuple[int, tuple[Path, Path]]:
+        """Point every photo path in the project at ``new_folder`` and
+        re-index it. Changes the project in memory only; returns how many of
+        the project's photos are there and the (old, new) pair whose edit
+        folder needs adopting."""
+        old, new = Path(old_folder), Path(new_folder)
+        if not new.is_dir():
+            raise ProjectError(f"{new} is not a folder.")
+        new = new.resolve()
+        bases = [old, old.resolve()]
+        folders, matched = [], False
+        for entry in self.source_directories:
+            moved = _rebase(entry, bases, new)
+            matched = matched or moved is not None
+            folders.append(moved if moved is not None else entry)
+        if not matched:
+            raise ProjectError(f"{old} is not one of this project's folders.")
+        self.source_directories = folders
+
+        def move(path: str) -> str:
+            moved = _rebase(path, bases, new)
+            return path if moved is None else moved
+
+        self.image_manifest = {move(k): v for k, v in self.image_manifest.items()}
+        self.purged_paths = [move(p) for p in self.purged_paths]
+        if self.last_selected_image:
+            self.last_selected_image = move(self.last_selected_image)
+        try:                                       # re-index: photos the project had not seen are given IDs
+            from src.engine.universal_loader import UniversalLoader
+
+            self.update_manifest(UniversalLoader().scan_folder(new))
+        except Exception as exc:                   # a folder that cannot be listed still relinks
+            logger.warning("Could not re-index %s: %s", new, exc)
+        found = sum(1 for key in self.image_manifest
+                    if _rebase(key, [new], new) is not None and Path(key).is_file())
+        return found, (old.resolve() if old.exists() else old, new)
+
+    def apply_changes(self, name: str | None = None, destination: str | Path | None = None,
+                      relinks=(), recent=None) -> int:
+        """Rename, move and relink in one step; returns how many photos were
+        relinked.
+
+        Everything is checked first, the project file is written once at its
+        final place, and only then is the old file removed and the recent
+        list updated. If anything fails the project is as it was, and the
+        old file is untouched.
+        """
+        before, old_path = self._state(), self.path
+        relinked, adoptions = 0, []
+        try:
+            for old_folder, new_folder in relinks:
+                found, pair = self._relink(old_folder, new_folder)
+                relinked += found
+                adoptions.append(pair)
+            if name is not None:
+                title = " ".join(str(name).split())[:NAME_LIMIT]
+                if not title:
+                    raise ProjectError("A project needs a name.")
+                self.project_name = title
+            folder = Path(destination) if destination is not None else old_path.parent
+            target = folder / (safe_filename(self.project_name) + PROJECT_SUFFIX)
+            if target.exists() and not _same_file(target, old_path):
+                raise ProjectError(f"A project file called {target.name} already exists in {folder}.")
+            self.path = target
+            self.save_project()
+        except Exception:
+            self._restore(before)
+            raise
+        if old_path.exists() and not _same_file(old_path, self.path):
+            try:
+                old_path.unlink()
+            except OSError as exc:
+                logger.warning("Could not remove the old project file %s: %s", old_path, exc)
+        for old_folder, new_folder in adoptions:
+            try:
+                _adopt_edit_folder(old_folder, new_folder)
+            except OSError as exc:
+                logger.warning("Could not carry the edit folder across to %s: %s", new_folder, exc)
+        if recent is None:
+            recent = RecentProjects()
+        recent.moved(old_path, self)
+        return relinked
+
+    def rename_project(self, new_name: str, recent=None) -> None:
+        """Give the project a new name; its file becomes ``<new name>.granite``
+        in the same folder and the recent list follows."""
+        self.apply_changes(name=new_name, recent=recent)
+
+    def relocate_project_file(self, new_destination_dir: str | Path, recent=None) -> Path:
+        """Move the project file to ``new_destination_dir``; returns its new path."""
+        self.apply_changes(destination=new_destination_dir, recent=recent)
+        return self.path
+
+    def relink_source_folder(self, old_folder: str | Path, new_folder: str | Path, recent=None) -> int:
+        """A photo folder moved: point the project at ``new_folder``. Every
+        photo path, removed photo and the selected photo follow it, and the
+        folder's ``-edit`` folder comes along so recipes, marks and virtual
+        copies stay attached. The folder is re-indexed (photos added since
+        get IDs); returns how many of the project's photos are in it."""
+        return self.apply_changes(relinks=[(old_folder, new_folder)], recent=recent)
 
     # -- the audit trail ---------------------------------------------------------- #
 
@@ -383,6 +576,25 @@ class RecentProjects:
     def forget(self, path: str | Path) -> None:
         self.entries = [e for e in self.entries if e.path != str(path)]
         self.save()
+
+    def moved(self, old_path: str | Path, project: GraniteProject) -> RecentProject | None:
+        """A project was renamed or its file moved: update its entry in
+        place (it keeps its position) and carry its thumbnail across."""
+        old = str(old_path)
+        entry = next((e for e in self.entries if e.path == old), None)
+        if entry is None:
+            return None
+        entry.title, entry.path = project.project_name, str(project.path)
+        if entry.thumbnail and Path(entry.thumbnail).is_file():
+            target = self.thumbnail_path(project)
+            if str(target) != entry.thumbnail:
+                try:
+                    os.replace(entry.thumbnail, target)
+                    entry.thumbnail = str(target)
+                except OSError:
+                    pass
+        self.save()
+        return entry
 
     def last(self) -> RecentProject | None:
         """The most recently opened project that still exists."""

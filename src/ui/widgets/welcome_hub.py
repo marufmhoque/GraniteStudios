@@ -14,8 +14,8 @@ from pathlib import Path
 from PyQt6.QtCore import QSize, Qt
 from PyQt6.QtGui import QIcon, QPixmap
 from PyQt6.QtWidgets import (
-    QCheckBox, QDialog, QFileDialog, QFormLayout, QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget,
-    QListWidgetItem, QPushButton, QVBoxLayout, QWidget,
+    QCheckBox, QDialog, QFileDialog, QFormLayout, QFrame, QHBoxLayout, QInputDialog, QLabel, QLineEdit,
+    QListWidget, QListWidgetItem, QMenu, QMessageBox, QPushButton, QVBoxLayout, QWidget,
 )
 
 from src import __version__
@@ -64,9 +64,12 @@ def recent_text(entry: pm.RecentProject) -> str:
 class WelcomeHub(QDialog):
     """Start a project, open one, or reopen a recent one."""
 
-    def __init__(self, recent: pm.RecentProjects, parent=None) -> None:
+    def __init__(self, recent: pm.RecentProjects, parent=None, locked_path: str | None = None) -> None:
+        """``locked_path`` is the project the window has open: it is changed
+        from File > Project Settings, not from here."""
         super().__init__(parent)
         self.recent = recent
+        self.locked_path = locked_path
         self.choice: tuple[str, str | None] | None = None
         self.setWindowTitle("Granite Studios")
         # Its own copy of the theme, so it is dark even before the window is.
@@ -122,6 +125,8 @@ class WelcomeHub(QDialog):
         self.list.setObjectName("RecentList")
         self.list.setIconSize(QSize(96, 64))
         self.list.itemActivated.connect(self._open_item)
+        self.list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.list.customContextMenuRequested.connect(self._on_context_menu)
         right.addWidget(self.list, stretch=1)
         self.empty_note = QLabel("Projects you open appear here.")
         self.empty_note.setObjectName("PageSubtitle")
@@ -172,6 +177,89 @@ class WelcomeHub(QDialog):
         first = next((i for i in range(self.list.count()) if self.list.item(i).flags() & Qt.ItemFlag.ItemIsEnabled), None)
         if first is not None:
             self.list.setCurrentRow(first)
+
+    # -- right-click: rename, relink, move, show, forget ---------------------------- #
+
+    def _on_context_menu(self, position) -> None:
+        item = self.list.itemAt(position)
+        if item is not None:
+            self.context_menu(item).exec(self.list.viewport().mapToGlobal(position))
+
+    def context_menu(self, item) -> QMenu:
+        """The right-click menu of one recent project."""
+        path = item.data(Qt.ItemDataRole.UserRole)
+        exists = Path(path).is_file()
+        locked = self.locked_path is not None and str(self.locked_path) == str(path)
+        menu = QMenu(self)
+        for text, handler, changes in (
+            ("\u270f\ufe0f Rename\u2026", self.rename_project, True),
+            ("\U0001F4C1 Relink Folders\u2026", self.relink_folders, True),
+            ("\U0001F4E6 Move Project File\u2026", self.move_project, True),
+            ("\U0001F50D Show in Explorer / Finder", self.show_in_file_manager, False),
+            ("\u274c Remove from Recent List", self.remove_from_recent, None),
+        ):
+            action = menu.addAction(text)
+            # Removing from the list always works; the rest need the file, and
+            # the ones that change the project not while it is open.
+            action.setEnabled(changes is None or (exists and not (changes and locked)))
+            if changes and locked:
+                action.setToolTip("This project is open: use File \u25b8 Project Settings.")
+            action.triggered.connect(lambda _c=False, h=handler, p=path: h(p))
+        return menu
+
+    def _load(self, path: str) -> pm.GraniteProject | None:
+        try:
+            return pm.load_project(path)
+        except pm.ProjectError as exc:
+            QMessageBox.warning(self, "Project", str(exc))
+            return None
+
+    def rename_project(self, path: str) -> bool:
+        project = self._load(path)
+        if project is None:
+            return False
+        name, ok = QInputDialog.getText(self, "Rename Project", "Project name:", text=project.project_name)
+        if not ok:
+            return False
+        try:
+            project.rename_project(name, recent=self.recent)
+        except pm.ProjectError as exc:
+            QMessageBox.warning(self, "Rename Project", str(exc))
+            return False
+        self._fill()
+        return True
+
+    def relink_folders(self, path: str) -> bool:
+        from src.ui.dialogs.project_settings_dialog import ProjectSettingsDialog
+
+        project = self._load(path)
+        if project is None:
+            return False
+        accepted = bool(ProjectSettingsDialog(project, self.recent, self).exec())
+        self._fill()
+        return accepted
+
+    def move_project(self, path: str) -> bool:
+        project = self._load(path)
+        if project is None:
+            return False
+        chosen = QFileDialog.getExistingDirectory(self, "Move the project file to", str(Path(path).parent))
+        if not chosen:
+            return False
+        try:
+            project.relocate_project_file(chosen, recent=self.recent)
+        except pm.ProjectError as exc:
+            QMessageBox.warning(self, "Move Project File", str(exc))
+            return False
+        self._fill()
+        return True
+
+    def show_in_file_manager(self, path: str) -> bool:
+        return pm.reveal_in_file_manager(path)
+
+    def remove_from_recent(self, path: str) -> None:
+        self.recent.forget(path)
+        self._fill()
 
     def _on_reopen_toggled(self, checked: bool) -> None:
         self.recent.reopen_last = bool(checked)

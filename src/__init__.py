@@ -3,7 +3,7 @@
 # The app's version: major.minor with two decimals. Every update that ships
 # raises it by 0.01 (python tools/bump_version.py); the README, pyproject
 # and installer read it from here.
-__version__ = "2.05"
+__version__ = "2.06"
 
 # OpenCV 5 prints a warning every time a network is created ("Targets are
 # not supported by the new graph engine"). It is harmless and, with one

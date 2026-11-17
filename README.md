@@ -1,6 +1,6 @@
 # Granite Studios
 
-**Current version: v2.05**
+**Current version: v2.06**
 
 ### [⬇️ Download the installer](https://github.com/marufmhoque/GraniteStudios/releases/latest/download/Install-GraniteStudios.bat)
 
@@ -80,7 +80,7 @@ Six workspaces over one folder: **Cull**, **Develop**, **Retouch**, **Design**, 
 - Straightening: under **1 degree** residual from scene lines, **0.6 degree** mean from the body when there are no lines
 - Background removal **1.36 times faster** on DirectML than CPU
 - De-blurring recovers **+5.2 dB** on a synthetic 10 px motion smear; a full-quality pass takes about **4 s** on the 1,600 px preview and **66 s** on a 24 MP export (a fast Wiener pass follows the slider in about 150 ms)
-- **667 automated tests** against real engines, 20,300 lines of application code and 5,600 lines of tests
+- **693 automated tests** against real engines, 20,300 lines of application code and 5,600 lines of tests
 
 **What it cannot do yet** (full list with reasons in [PRD.md](PRD.md) section 8):
 
@@ -259,6 +259,9 @@ filmstrip along the bottom.
 - **The Project Hub** at launch has New Project, Open Existing Project, and your recent projects with a thumbnail, photo and keeper counts and when each was last opened. Tick **Always reopen last active project on startup** to skip it
 - **File ▸ Open Project** (Ctrl+O), **Save Project** (Ctrl+S; with no project open it offers to make one from the open folder) and **Recent Projects**. Projects also save themselves on close and after removing or restoring images
 - **📋 History** (top right) slides out the project's activity drawer: a **workflow checklist** (Ingest, Cull, Blur Triage, Auto-Level, Develop with *X/Y completed*, Export) and a **timeline** of every batch operation with its time ("Smart Cull: 420 keepers starred", "Removed 1,200 culled photos"). It is saved in the `.granite` file; work done before a project existed is kept by a project made from that folder
+- **File ▸ Project Settings** (Ctrl+Shift+P, Cmd+Shift+P on a Mac) renames the project, moves its `.granite` file and relinks its photo folders. Nothing changes until **Save**, and then everything is applied together or not at all. The photos are never touched
+- **Moved or renamed a photo folder?** Opening the project says *"The folder '…' could not be found. Would you like to locate it now?"* and relinks it to where you point. Every photo, the removed photos and the selected photo follow, and the folder's `-edit` folder (ratings, edits, virtual copies, history) comes along under the new folder's name, so nothing detaches
+- **Right-click a recent project** in the Hub: ✏️ Rename, 📁 Relink Folders, 📦 Move Project File, 🔍 Show in Explorer / Finder, ❌ Remove from Recent List (which only forgets the entry; the file stays). The project that is open is changed from Project Settings instead
 - A project holds one folder for now (the file format already allows several)
 - **Show:** filters the grid to *Keepers*, *AI picks*, *Duplicates*, *Rejected*, *Blurry*, *Motion blur* or *Out of focus*, and to one person after **Group by Person**
 
@@ -423,7 +426,7 @@ python tests/fetch_media.py   # optional: CC0 camera RAW samples and reference f
 pytest
 ```
 
-**667 tests.** They drive the real engines and the real window (headless,
+**693 tests.** They drive the real engines and the real window (headless,
 with `QT_QPA_PLATFORM=offscreen`); nothing is mocked except file dialogs.
 Tests that need a downloaded model or sample file are marked `model` or
 `media` and skip themselves when it is absent.

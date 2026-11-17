@@ -207,12 +207,15 @@ def test_a_project_made_from_the_open_folder_reopens_where_work_stopped(harness,
     assert w.current_workspace is w.develop
 
 
-def test_a_missing_photo_folder_is_explained(harness, tmp_path):
+def test_a_missing_photo_folder_is_explained(harness, tmp_path, monkeypatch):
+    from PyQt6.QtWidgets import QMessageBox
+
     folder = tmp_path / "Card"
     folder.mkdir()
     project = pm.create_project("Card", folder, tmp_path)
     folder.rmdir()
     w = harness.window
+    monkeypatch.setattr(QMessageBox, "question", staticmethod(lambda *a, **k: QMessageBox.StandardButton.No))
     assert not w.open_project(project.path)
     assert any("can no longer be found" in text for _, text in harness.messages)
 

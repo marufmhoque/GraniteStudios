@@ -283,6 +283,9 @@ class MainWindow(QMainWindow):
         self.save_project_action = file_menu.addAction("Save Project")
         self.save_project_action.setShortcut(QKeySequence("Ctrl+S"))
         self.save_project_action.triggered.connect(self.save_project)
+        self.project_settings_action = file_menu.addAction("Project Settings\u2026")
+        self.project_settings_action.setShortcut(QKeySequence("Ctrl+Shift+P"))   # Cmd+Shift+P on macOS
+        self.project_settings_action.triggered.connect(self.project_settings)
         self.recent_menu = file_menu.addMenu("Recent Projects")
         self.recent_menu.aboutToShow.connect(self._fill_recent_menu)
         file_menu.addSeparator()
@@ -337,7 +340,7 @@ class MainWindow(QMainWindow):
     def show_hub(self) -> None:
         from src.ui.widgets.welcome_hub import FOLDER, NEW, OPEN, RECENT, WelcomeHub
 
-        hub = WelcomeHub(self.recent, self)
+        hub = WelcomeHub(self.recent, self, locked_path=str(self.project.path) if self.project else None)
         if not hub.exec() or hub.choice is None:
             return
         action, path = hub.choice
@@ -396,12 +399,10 @@ class MainWindow(QMainWindow):
         except pm.ProjectError as exc:
             QMessageBox.warning(self, "Open Project", str(exc))
             return False
-        folder = project.folder
-        if folder is None or not folder.is_dir():
-            QMessageBox.warning(self, "Open Project",
-                                f"The photos for {project.project_name} were in {folder}, which can no "
-                                "longer be found. Reconnect the drive, or move the folder back, and try again.")
+        relinked = self._locate_missing_folders(project)
+        if relinked is None:
             return False
+        folder = project.folder
         self._leave_project()
         self.cull.open_folder(folder)
         project.last_opened = pm._now()
@@ -415,7 +416,59 @@ class MainWindow(QMainWindow):
         self._update_title()
         self._refresh_history_drawer()
         self.status_label.setText(f"Opened project {project.project_name}: {self.session.total_images} photos"
-                                  + (f" ({len(self.session.purged)} removed)" if self.session.purged else "") + ".")
+                                  + (f" ({len(self.session.purged)} removed)" if self.session.purged else "") + "."
+                                  + (f" Relinked {relinked:,} photos to {folder}." if relinked else ""))
+        return True
+
+    def _locate_missing_folders(self, project: pm.GraniteProject) -> int | None:
+        """Offer to find each photo folder that cannot be reached. Returns
+        how many photos were relinked, or None if a folder stayed missing."""
+        ok, missing = project.verify_media_accessibility()
+        relinked = 0
+        for folder in ([] if ok else missing):
+            answer = QMessageBox.question(
+                self, "Locate Folder",
+                f"The folder '{folder}' could not be found. Would you like to locate it now?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.Yes)
+            chosen = ""
+            if answer == QMessageBox.StandardButton.Yes:
+                start = folder.parent if folder.parent.is_dir() else Path.home()
+                chosen = QFileDialog.getExistingDirectory(self, f"Locate {folder.name}", str(start))
+            if not chosen:
+                QMessageBox.warning(self, "Open Project",
+                                    f"The photos for {project.project_name} were in {folder}, which can no "
+                                    "longer be found. Reconnect the drive, or move the folder back, and try again.")
+                return None
+            try:
+                relinked += project.relink_source_folder(folder, chosen, recent=self.recent)
+            except pm.ProjectError as exc:
+                QMessageBox.warning(self, "Open Project", str(exc))
+                return None
+        return relinked
+
+    def project_settings(self) -> bool:
+        """File > Project Settings: rename the project, move its file, relink
+        its folders. True if anything was saved."""
+        from src.ui.dialogs.project_settings_dialog import ProjectSettingsDialog
+
+        if self.project is None:
+            self.status_label.setText("Open a project first (File \u25b8 Open Project, or Ctrl+N to make one).")
+            return False
+        self.save_project(quiet=True)                   # the file on disk is current before it is changed
+        folder = self.project.folder
+        dialog = ProjectSettingsDialog(self.project, self.recent, self)
+        if not dialog.exec():
+            return False
+        self._update_title()
+        if self.project.folder != folder:
+            # The open folder moved: reopen from the file, so nothing keeps the old paths.
+            path = self.project.path
+            self.session.save_all()
+            self.project = None
+            self.open_project(path)
+        else:
+            self.status_label.setText(f"Saved the settings of {self.project.project_name}.")
+        self._refresh_history_drawer()
         return True
 
     def save_project(self, quiet: bool = False) -> bool:

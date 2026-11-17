@@ -65,7 +65,7 @@ workspaces. In summary:
 | Graphics | None | Vector text, shapes, watermarks; SVG and PDF ([FR-17](#fr-17-design-and-vector-graphics)) |
 | Versions | None | Virtual copies with style branches, added in 2.00 ([FR-19](#fr-19-versions-virtual-copies)) |
 | De-blur | Unsharp mask only | Deconvolution of motion and focus blur, added in 2.00 ([FR-20](#fr-20-de-blur-deconvolution)) |
-| Tests | None | **667** pytest tests ([7](#7-quality-and-verification)) |
+| Tests | None | **693** pytest tests ([7](#7-quality-and-verification)) |
 
 ---
 
@@ -684,9 +684,18 @@ launch are replaced in tests.
 | FR-22.9 | Audit log | `audit_log` in the project: time, stage, description for each batch operation (Smart Cull, cull to target, reject non-picks, blur triage, sharpening, auto-level, remove and restore, batch grade, sync, batch copies, export); saved with the project, at most 1,000 entries; logged before a project exists, adopted by a project made from that folder | **Done** (2.05) |
 | FR-22.10 | Workflow checklist and History drawer | `stage_status` plus the session: Ingest, Cull, Blur Triage, Auto-Level (Done / Not Started), Develop (In Progress X/Y keepers edited), Export (Done / Pending); the **📋 History** button slides out a drawer with the checklist and the timeline, newest first | **Done** (2.05) |
 
-**Module:** `engine/project_manager.py`, `ui/widgets/welcome_hub.py`,
+| FR-22.11 | Rename | `rename_project`: the name inside the file and `<name>.granite` on disk change together, the recent entry follows (keeping its place and thumbnail); an empty name or one another project file already has is refused and changes nothing; a change of case alone works | **Done** (2.06) |
+| FR-22.12 | Move the project file | `relocate_project_file`: the file is written at its new place (the folder is created) before the old one is removed; an existing file there is never replaced; the recent entry follows | **Done** (2.06) |
+| FR-22.13 | Relink a photo folder | `relink_source_folder`: every photo path, removed photo and the selected photo are rewritten under the new folder, photo IDs are kept, the folder is re-indexed, and the `-edit` folder is carried across (renamed `<new>-edit` if it moved with the photos, copied if the old folder remains, left alone if the new folder has its own) so recipes, marks, virtual copies and history stay attached; returns how many of the project's photos are there | **Done** (2.06) |
+| FR-22.14 | Missing folders | `verify_media_accessibility` returns whether every folder is there and the ones that are not; opening a project with one missing asks *"The folder '…' could not be found. Would you like to locate it now?"* and relinks it | **Done** (2.06) |
+| FR-22.15 | Project Settings | File menu, Ctrl+Shift+P: name, file path with Move, a folder table (🟢 Connected / 🔴 Missing, Relink Folder), applied together on Save or not at all; the Hub's right-click menu offers Rename, Relink Folders, Move Project File, Show in Explorer / Finder, Remove from Recent List | **Done** (2.06) |
+| FR-22.16 | Add a folder to a project | A project opening more than one folder | **Not built** — see FR-22.8 |
+
+All of this writes only the project file, the recent list and the app's own `-edit` folder; the photos are never touched (INV-1, hashed in `test_project_settings.py`).
+
+**Module:** `engine/project_manager.py`, `ui/dialogs/project_settings_dialog.py`, `ui/widgets/welcome_hub.py`,
 `ui/main_window.py`, `ui/widgets/activity_log_drawer.py`. **Verified:** `tests/test_project_manager.py`,
-`tests/test_audit_log.py`.
+`tests/test_audit_log.py`, `tests/test_project_settings.py`.
 
 ---
 
@@ -902,7 +911,7 @@ verified whole and unpacked in memory, so no unverified file reaches disk.
 
 ### 7.1 Approach
 
-**667 pytest tests** (666 pass and 1 skips on the development machine, where
+**693 pytest tests** (692 pass and 1 skips on the development machine, where
 the hosted backend's own requirements are not installed). They exercise the
 real engines and the real window — headless, with `QT_QPA_PLATFORM=offscreen`
 — and mock nothing but file dialogs and, in two tests, the network.
@@ -924,6 +933,7 @@ repository, which may sit on a synced drive.
 | `test_vector_canvas.py` | 49 | Shapes, text layout and scaling, tokens, snapping, SVG and PDF dimensions, templates |
 | `test_project_manager.py` | 22 | Project create, save, reload, stable IDs, active images, reopening where work stopped, damaged files, recent list, File menu, hub, start-up |
 | `test_virtual_copies.py` | 14 | Virtual copies: media untouched and not duplicated, tiles beside the parent, chips and names, independent recipes, Ctrl+D in Cull and Develop, copy tile menu, export of a selected copy; Smart Priority order, ranks and divider |
+| `test_project_settings.py` | 26 | Rename (file, name, recent list, bad names, case), moving the project file, relinking (every path, removed and selected photos, IDs, the edit folder renamed or copied, recipes and copies found again), missing folders, originals hashed untouched, the dialog applying everything or nothing, the window's locate prompt and Project Settings, the Hub's right-click menu |
 | `test_audit_log.py` | 13 | Audit log and stages, persistence, damaged logs, the checklist, the window's logging, adoption by a new project, the History drawer; edit history labels, storage, restore-to-step, copies, the Develop panel |
 | `test_purge.py` | 12 | Remove Images: files untouched, set and exports updated, restore with marks and edits, persistence, Cull button, shortcut, restore dialog, filmstrips |
 | `test_color_splash.py` | 11 | One-click layer, recipe round trip, object kept and rest grey at equal brightness, off / inverted / partial, the selection cached, model absent, luminance-preserving saturation, the Retouch tool, export |
