@@ -7,7 +7,9 @@
     EXPORT    everything that writes files
     VIDEO     the FFmpeg editor
 
-Ctrl+1 to Ctrl+6 switch between them. All of them look at the same
+Ctrl+1 to Ctrl+6 switch between them. The **📋 History** button opens the
+project's activity drawer: the workflow checklist and a timeline of every
+batch operation (see :meth:`MainWindow.log_action`). All of them look at the same
 :class:`~src.engine.session.LibrarySession`, so a selection, a rating or a
 rejection made in one is seen in every other, and the filmstrip along the
 bottom of the editing workspaces is the same set of frames as the grid.
@@ -120,6 +122,7 @@ class MainWindow(QMainWindow):
         self.available_version: str | None = None
         self.project: pm.GraniteProject | None = None
         self._recent: pm.RecentProjects | None = None
+        self._pending_log: list[dict] = []        # batch operations before a project exists
         self._update_signals = _UpdateSignals(self)
         self._update_signals.result.connect(self._on_update_result)
 
@@ -211,6 +214,12 @@ class MainWindow(QMainWindow):
         engine.setStyleSheet("color: #6a6b72; font-size: 11px; padding-right: 12px;")
         row.addWidget(engine)
         self._build_version_controls(row)
+        self.history_button = QPushButton("\U0001F4CB History")
+        self.history_button.setObjectName("SecondaryButton")
+        self.history_button.setCheckable(True)
+        self.history_button.setToolTip("The project's workflow checklist and activity timeline")
+        self.history_button.clicked.connect(self.toggle_history)
+        row.addWidget(self.history_button)
         self.load_button = QPushButton("Load Folder")
         self.load_button.setObjectName("ActionButton")
         self.load_button.clicked.connect(lambda: self.cull._on_load_folder())
@@ -224,6 +233,12 @@ class MainWindow(QMainWindow):
         status_row.setContentsMargins(16, 6, 16, 6)
         status_row.addWidget(self.status_label, stretch=1)
         column.addWidget(status)
+        self._bar, self._status_bar = bar, status
+
+        from src.ui.widgets.activity_log_drawer import ActivityLogDrawer
+
+        self.history_drawer = ActivityLogDrawer(root)
+        self.history_drawer.closed.connect(lambda: self.history_button.setChecked(False))
 
         self.nav_buttons[0].setChecked(True)
         self._current_index = 0
@@ -352,7 +367,20 @@ class MainWindow(QMainWindow):
         except pm.ProjectError as exc:
             QMessageBox.warning(self, "New Project", str(exc))
             return None
-        return self.project if self.open_project(project.path) else None
+        # What was done to this folder before the project existed comes with it.
+        try:
+            same = self.session.current_folder is not None and \
+                Path(self.session.current_folder).resolve() == Path(folder).resolve()
+        except OSError:
+            same = False
+        earlier = list(self._pending_log) if same and self.project is None else []
+        if not self.open_project(project.path):
+            return None
+        self.project.adopt(earlier)
+        self.project.log_action("ingest", f"Project created: {len(self.session.all_paths):,} photos imported")
+        self.save_project(quiet=True)
+        self._refresh_history_drawer()
+        return self.project
 
     def open_project_dialog(self) -> None:
         start = pm.default_projects_folder()
@@ -385,6 +413,7 @@ class MainWindow(QMainWindow):
                 break
         self.save_project(quiet=True)
         self._update_title()
+        self._refresh_history_drawer()
         self.status_label.setText(f"Opened project {project.project_name}: {self.session.total_images} photos"
                                   + (f" ({len(self.session.purged)} removed)" if self.session.purged else "") + ".")
         return True
@@ -448,6 +477,49 @@ class MainWindow(QMainWindow):
     def _on_session_for_project(self, topic: str) -> None:
         if topic == session_topics.PURGED and self.project is not None:
             self.save_project(quiet=True)
+        elif topic == session_topics.LIBRARY:
+            self._pending_log = []                 # another folder: start its log afresh
+            self._refresh_history_drawer()
+
+    # -- the audit trail ------------------------------------------------------------ #
+
+    def log_action(self, stage: str, description: str) -> dict:
+        """Record a batch operation in the project's activity log and save.
+        With no project open it is kept until one is made from this folder."""
+        if self.project is not None:
+            entry = self.project.log_action(stage, description)
+            self.save_project(quiet=True)
+        else:
+            entry = pm.make_entry(stage, description)
+            self._pending_log.append(entry)
+            del self._pending_log[:-pm.AUDIT_LIMIT]
+        self._refresh_history_drawer()
+        return entry
+
+    def _refresh_history_drawer(self) -> None:
+        drawer = self.__dict__.get("history_drawer")
+        if drawer is not None and drawer.is_open:
+            drawer.refresh(self.project, self.session, self._pending_log)
+
+    def _dock_history_drawer(self) -> None:
+        drawer = self.__dict__.get("history_drawer")
+        if drawer is not None:
+            drawer.top, drawer.bottom = self._bar.height(), self._status_bar.height()
+            drawer.reposition()
+
+    def toggle_history(self) -> bool:
+        """Slide the History drawer in or out."""
+        drawer = self.history_drawer
+        if not drawer.is_open:
+            drawer.refresh(self.project, self.session, self._pending_log)
+            self._dock_history_drawer()
+        opened = drawer.toggle()
+        self.history_button.setChecked(opened)
+        return opened
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        super().resizeEvent(event)
+        self._dock_history_drawer()
 
     # -- updates ----------------------------------------------------------------- #
 

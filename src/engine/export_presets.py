@@ -73,11 +73,13 @@ class FrameJob:
 
 
 def version_tag(version: int, name: str) -> str:
-    """The file-name tag for a copy: ``v2-moody-edit``. Empty for the master."""
+    """The file-name tag for a copy, numbered like its grid chip (the master
+    is v1, so copy 1 is ``v2-moody-edit``). Empty for the master."""
     if version == 0:
         return ""
     slug = re.sub(r"[^a-z0-9]+", "-", name.casefold()).strip("-")[:32]
-    return f"v{version}-{slug}" if slug else f"v{version}"
+    number = int(version) + 1
+    return f"v{number}-{slug}" if slug else f"v{number}"
 
 
 def render_frame(job: FrameJob, bits: int = 8) -> np.ndarray:

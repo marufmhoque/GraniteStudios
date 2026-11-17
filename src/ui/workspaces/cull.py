@@ -8,10 +8,13 @@ Keyboard, with the grid focused:
     U           clear pick and reject           Enter   open in Develop
     S           survey the selection side by side
     F           face loupe for the selection
-    Ctrl+'      create a version (virtual copy) of each target frame
+    Ctrl+D      duplicate: a virtual copy of each selected tile (Ctrl+' too)
+    Shift+Del   remove the rejected photos from the project
 
-Right-click a thumbnail for its versions: make a copy, make the three style
-versions, or choose which version is shown and edited.
+Virtual copies are tiles of their own, right after their parent, with a
+``v2``, ``v3`` chip. Right-click any tile to duplicate it, or to rename or
+delete a copy. The Sort menu's Smart Priority keeps the keepers on top and
+sinks the culled, blurry and rejected below a divider.
 
 Ratings, labels and picks apply to the selection, or to the current frame
 when nothing is selected. Every action that used to write a straightened,
@@ -98,6 +101,9 @@ class CullWorkspace(Workspace):
         super().__init__(shell)
         self.cells: dict[str, ThumbnailCell] = {}
         self._parked: dict[str, ThumbnailCell] = {}      # removed photos' cells, hidden
+        self.copy_cells: dict[tuple[str, int], ThumbnailCell] = {}   # (photo, copy id) tiles
+        self.divider: QLabel | None = None
+        self._order: tuple = ()
         self._thumb_worker: ThumbnailWorker | None = None
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         layout = QVBoxLayout(self)
@@ -112,7 +118,11 @@ class CullWorkspace(Workspace):
             self._rebuild_grid()
         elif topic == session_topics.PURGED:
             self._sync_removed()
-        elif topic in (session_topics.MARKS, session_topics.RECIPE, session_topics.VERSIONS):
+        elif topic == session_topics.VERSIONS:
+            self._sync_copies()
+            self._refresh_marks()
+            self._show_current()
+        elif topic in (session_topics.MARKS, session_topics.RECIPE):
             self._refresh_marks()
         elif topic == session_topics.CURRENT:
             self._show_current()
@@ -144,23 +154,41 @@ class CullWorkspace(Workspace):
             versions = self.session.versions(key)
             active = self.session.active_version(key)
             cell.set_versions([v.name for v in versions], [v.id for v in versions].index(active))
+        for (key, version), cell in self.copy_cells.items():
+            cell.set_rejected(key in self.rejected)
+            cell.set_marks(
+                self.session.ratings.get(key, 0), self.session.color_labels.get(key),
+                key in self.session.picks, self.session.has_edits(key, version),
+            )
+            entry = self.session.entry(key, version)
+            cell.set_copy_chip(entry.chip, entry.name, self.session.active_version(key) == version)
+            cell.set_selected((key, version) in self.session.selected_copies)
         self._refresh_reject_button()
-        self._apply_view_filter()
+        if not self._relayout_if_reordered():
+            self._apply_view_filter()
+
+    def _current_tile(self):
+        current = self.session.current
+        if current is None:
+            return None
+        version = self.session.active_version(current)
+        return self.cells.get(current) if version == session_topics.MASTER else self.copy_cells.get((current, version))
 
     def _show_current(self) -> None:
-        current = self.session.current
-        for key, cell in self.cells.items():
-            cell.setProperty("current", key == current)
-            frame = "2px solid #ffffff" if key == current else ""
-            cell.setStyleSheet(f"QLabel#Thumb, QLabel#ThumbSelected {{ border: {frame}; }}" if frame else "")
-        cell = self.cells.get(current or "")
-        if cell is not None:
-            self.grid_scroll.ensureWidgetVisible(cell, 20, 20)
+        shown = self._current_tile()
+        for cell in list(self.cells.values()) + list(self.copy_cells.values()):
+            is_current = cell is shown
+            cell.setProperty("current", is_current)
+            cell.setStyleSheet("QLabel#Thumb, QLabel#ThumbSelected { border: 2px solid #ffffff; }"
+                               if is_current else "")
+        if shown is not None:
+            self.grid_scroll.ensureWidgetVisible(shown, 20, 20)
 
     # -- keyboard ------------------------------------------------------------- #
 
     def _visible_keys(self) -> list[str]:
-        return [str(p) for p in self._visible_paths()]
+        """The photos the grid shows, in the order it shows them."""
+        return [k for k in self.display_order() if self._passes_view_filter(k)]
 
     def _mark_targets(self) -> list[str]:
         return sorted(self.selected) if self.selected else ([self.session.current] if self.session.current else [])
@@ -194,7 +222,7 @@ class CullWorkspace(Workspace):
         elif key == Qt.Key.Key_F:
             self._on_face_loupe()
         elif key == Qt.Key.Key_Apostrophe and event.modifiers() & Qt.KeyboardModifier.ControlModifier:
-            self.create_versions(targets)
+            self.create_virtual_copies()
         elif key == Qt.Key.Key_Escape and self.view_stack.currentIndex():
             self.view_stack.setCurrentIndex(0)
         else:
@@ -435,6 +463,9 @@ class CullWorkspace(Workspace):
         for keys in ("Shift+Delete", "Shift+Backspace"):
             QShortcut(QKeySequence(keys), self, activated=self.remove_images,
                       context=Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        # Ctrl+D is Cmd+D on macOS: Qt maps it.
+        QShortcut(QKeySequence("Ctrl+D"), self, activated=self.create_virtual_copies,
+                  context=Qt.ShortcutContext.WidgetWithChildrenShortcut)
 
         sel_row.addStretch()
 
@@ -452,6 +483,14 @@ class CullWorkspace(Workspace):
         self.view_filter.setToolTip("Filter which photos the grid shows.")
         self.view_filter.currentIndexChanged.connect(self._apply_view_filter)
         sel_row.addWidget(self.view_filter)
+        self.sort_combo = QComboBox()
+        self.sort_combo.addItem("Sort: Capture Order", session_topics.SORT_CAPTURE)
+        self.sort_combo.addItem("Sort: Smart Priority (Keepers First)", session_topics.SORT_SMART_PRIORITY)
+        self.sort_combo.setToolTip(
+            "Smart Priority puts picks and starred photos first, then unrated keepers, and sinks "
+            "duplicates, blinks, blurry and rejected photos below a divider.")
+        self.sort_combo.currentIndexChanged.connect(lambda _index: self._layout_cells())
+        sel_row.addWidget(self.sort_combo)
         layout.addLayout(sel_row)
 
         # --- Row 2: AI culling ------------------------------------------- #
@@ -721,7 +760,7 @@ class CullWorkspace(Workspace):
             "Virtual copies: extra edits of the same photo that share its pixels. "
             "Applies to the selection, or the current frame.")
         versions_menu = QMenu(self.versions_button)
-        versions_menu.addAction("Create Version  (Ctrl+')", lambda: self.create_versions(self._mark_targets()))
+        versions_menu.addAction("Duplicate / Create Virtual Copy  (Ctrl+D)", self.create_virtual_copies)
         versions_menu.addAction("Create 3 Style Versions (" + ", ".join(pr.VERSION_STYLES).replace("&", "&&") + ")",
                                 lambda: self.create_style_versions(self._mark_targets()))
         self.versions_button.setMenu(versions_menu)
@@ -760,6 +799,29 @@ class CullWorkspace(Workspace):
 
         return page
 
+    def _on_master_clicked(self, path: str) -> None:
+        """A parent tile: it shows and edits the master."""
+        if path in self.cells and self.session.version_count(path) > 1:
+            self.session.set_active_version(path, session_topics.MASTER)
+        self._on_thumb_clicked(path)
+
+    def _on_copy_clicked(self, key: str, version: int) -> None:
+        """A copy's tile: make it the version shown and edited, and toggle
+        it in the selection (for export)."""
+        cell = self.copy_cells.get((key, version))
+        if cell is None:
+            return
+        self.setFocus()
+        tile = (key, version)
+        chosen = self.session.selected_copies
+        (chosen.discard if tile in chosen else chosen.add)(tile)
+        cell.set_selected(tile in chosen)
+        self.session.set_current(key)
+        self.session.set_active_version(key, version)
+        self.session.notify(session_topics.SELECTION)
+        self._show_current()
+        self._refresh_status()
+
     def _on_thumb_clicked(self, path: str) -> None:
         cell = self.cells.get(path)
         if cell is None:
@@ -787,6 +849,38 @@ class CullWorkspace(Workspace):
                 "every version renders from the same original.")
         return made
 
+    def create_virtual_copies(self, entries=None) -> list:
+        """Duplicate each selected tile (or the tile being shown) as a new
+        virtual copy, placed right after its parent. Only edit settings are
+        copied; no image data is duplicated."""
+        if entries is None:
+            entries = self.session.selected_entries()
+            current = self.session.current
+            if not entries and current and current in self.session.keys():
+                entries = [self.session.entry(current, self.session.active_version(current))]
+        made = [self.session.entry(e.key, self.session.create_version(e.key, source=e.version))
+                for e in entries]
+        if not made:
+            self.status_label.setText("Select a photo to duplicate first.")
+            return []
+        self.session.save_all()
+        if len(made) == 1:
+            self.status_label.setText(
+                f"Created virtual copy {made[0].variant_key}: its own edit of the same original. "
+                "No image data was duplicated.")
+        else:
+            self.status_label.setText(
+                f"Created {len(made):,} virtual copies. Only the edit settings were copied; "
+                "every copy renders from its original.")
+            self.shell_log("develop", f"Virtual copies: {len(made):,} created")
+        return made
+
+    def shell_log(self, stage: str, description: str) -> None:
+        """Add a line to the project's activity log, when there is a window to keep it."""
+        log = getattr(type(self.shell), "log_action", None)
+        if log is not None:
+            log(self.shell, stage, description)
+
     def create_style_versions(self, keys) -> int:
         """Cinematic, Warm Analog and Clean B&W for each frame, from its master."""
         for key in keys:
@@ -798,17 +892,52 @@ class CullWorkspace(Workspace):
                 + ", ".join(pr.VERSION_STYLES) + ". Open one in Develop to fine-tune it.")
         return len(keys) * len(pr.VERSION_STYLES)
 
-    def _on_cell_menu(self, key: str, where) -> None:
+    def _on_cell_menu(self, key: str, where, version: int | None = None) -> None:
         self.session.set_current(key)
-        menu = self.version_menu(key)
+        menu = self.version_menu(key, version)
         menu.exec(where if where is not None else QCursor.pos())
 
-    def version_menu(self, key: str) -> QMenu:
-        """The right-click menu of one thumbnail."""
+    def _open_version(self, key: str, version: int) -> None:
+        self.session.set_active_version(key, version)
+        self.shell.open_in_develop(key)
+
+    def rename_copy(self, key: str, version: int) -> str | None:
+        from PyQt6.QtWidgets import QInputDialog
+
+        name, ok = QInputDialog.getText(self, "Rename Copy", "Name of this virtual copy:",
+                                        text=self.session.version_name(key, version))
+        if not ok:
+            return None
+        try:
+            return self.session.rename_version(key, version, name)
+        except ValueError as exc:
+            QMessageBox.information(self, "Rename Copy", str(exc))
+            return None
+
+    def delete_copy(self, key: str, version: int) -> bool:
+        entry = self.session.entry(key, version)
+        answer = QMessageBox.question(
+            self, "Delete Virtual Copy",
+            f"Delete the virtual copy {entry.variant_key} ({entry.name}) and its edits?\n\n"
+            "The original photo and its other versions are not touched.")
+        if answer != QMessageBox.StandardButton.Yes:
+            return False
+        self.session.delete_version(key, version)
+        self.status_label.setText(f"Deleted the virtual copy {entry.variant_key}. The original is untouched.")
+        return True
+
+    def version_menu(self, key: str, version: int | None = None) -> QMenu:
+        """The right-click menu of one tile (``version`` given for a copy's tile)."""
         menu = QMenu(self)
-        menu.addAction("Open in Develop", lambda: self.shell.open_in_develop(key))
+        source = session_topics.MASTER if version is None else version
+        menu.addAction("Open in Develop", lambda: self._open_version(key, source))
         menu.addSeparator()
-        menu.addAction("Create Version", lambda: self.create_versions([key]))
+        menu.addAction("Duplicate / Create Virtual Copy",
+                       lambda: self.create_virtual_copies([self.session.entry(key, source)]))
+        if version not in (None, session_topics.MASTER):
+            menu.addAction("Rename Copy…", lambda: self.rename_copy(key, version))
+            menu.addAction("Delete Virtual Copy", lambda: self.delete_copy(key, version))
+            return menu
         menu.addAction("Create 3 Style Versions", lambda: self.create_style_versions([key]))
         versions = self.session.versions(key)
         if len(versions) > 1:
@@ -1014,9 +1143,10 @@ class CullWorkspace(Workspace):
                 dp.set_rotation(recipe.geometry, result.total_angle)
                 recipe.geometry.constrain_to_image = corners == "Crop"
                 recipe.geometry.fill_blank = corners == "Fill"
-                self.session.set_recipe(path, recipe)
-            self.session.save_recipes()
+                self.session.set_recipe(path, recipe, label="Auto-Level")
+            self.session.save_all()
             skipped = len(found) - len(changed)
+            self.shell_log("auto_level", f"Auto-Level: {len(changed):,} leveled, {skipped:,} already upright")
             if not changed:
                 self.status_label.setText(f"All {skipped} selected photo(s) were already upright.")
                 return
@@ -1063,6 +1193,8 @@ class CullWorkspace(Workspace):
 
             if blurry:
                 self._set_rejected(blurry, True)
+            self.shell_log("blur_triage", f"Blur Triage: {len(blurry):,} of {len(paths):,} flagged and demoted")
+            self._relayout_if_reordered()
 
             motion = sum(1 for r in reports.values() if r.verdict == blur_analysis.MOTION_BLUR)
             defocus = sum(1 for r in reports.values() if r.verdict == blur_analysis.OUT_OF_FOCUS)
@@ -1116,8 +1248,9 @@ class CullWorkspace(Workspace):
             recipe = self.session.recipe(path).copy()
             recipe.detail.sharpen_amount = max(recipe.detail.sharpen_amount, 80.0)
             recipe.detail.sharpen_radius = 1.2
-            self.session.set_recipe(path, recipe)
-        self.session.save_recipes()
+            self.session.set_recipe(path, recipe, label="Sharpen recoverable blur")
+        self.session.save_all()
+        self.shell_log("blur_triage", f"Sharpened {len(targets):,} recoverable frames")
         self.status_label.setText(
             f"Added sharpening to {len(targets)} frame(s)' edits. Adjust it in Develop; it is "
             f"applied at export. This lifts edge contrast; it does not reconstruct detail "
@@ -1131,7 +1264,12 @@ class CullWorkspace(Workspace):
     def _sync_selection_ui(self) -> None:
         for path, cell in self.cells.items():
             cell.set_selected(path in self.selected)
+        for tile, cell in self.copy_cells.items():
+            cell.set_selected(tile in self.session.selected_copies)
         self._refresh_status()
+
+    def _visible_copies(self) -> set[tuple[str, int]]:
+        return {t for t in self.copy_cells if self._passes_view_filter(t[0])}
 
     def _on_select_all(self) -> None:
         """Select everything the grid is showing.
@@ -1143,15 +1281,18 @@ class CullWorkspace(Workspace):
         if not self.image_paths:
             return
         self.selected = {str(p) for p in self._visible_paths()}
+        self.session.selected_copies = self._visible_copies()
         self._sync_selection_ui()
 
     def _on_select_none(self) -> None:
         self.selected.clear()
+        self.session.selected_copies.clear()
         self._sync_selection_ui()
 
     def _on_select_invert(self) -> None:
         visible = {str(p) for p in self._visible_paths()}
         self.selected = visible - self.selected
+        self.session.selected_copies = self._visible_copies() - self.session.selected_copies
         self._sync_selection_ui()
 
     def _set_rejected(self, paths, rejected: bool) -> None:
@@ -1202,6 +1343,7 @@ class CullWorkspace(Workspace):
             return
         self._set_rejected(losers, True)
         keepers = len(self.last_cull_frames) - len(losers)
+        self.shell_log("cull", f"Rejected {len(losers):,} non-picks; {keepers:,} keepers remain")
         self.status_label.setText(
             f"Rejected {len(losers)} non-picks; {keepers} keeper(s) remain. "
             f"Nothing was deleted — review them before exporting."
@@ -1262,7 +1404,8 @@ class CullWorkspace(Workspace):
         return True
 
     def _apply_view_filter(self) -> None:
-        """Show or hide cells to match the chosen filter."""
+        """Show or hide cells to match the chosen filter. A copy's tile
+        follows its parent's."""
         if not hasattr(self, "view_filter"):
             return
         shown = 0
@@ -1271,6 +1414,8 @@ class CullWorkspace(Workspace):
             cell.setVisible(visible)
             if visible:
                 shown += 1
+        for (path, _version), cell in self.copy_cells.items():
+            cell.setVisible(path in self.cells and not self.cells[path].isHidden())
         self._refresh_status(shown)
 
     def _refresh_status(self, shown: int | None = None) -> None:
@@ -1285,6 +1430,9 @@ class CullWorkspace(Workspace):
         parts.append(f"{len(self.selected)} selected")
         if self.rejected:
             parts.append(f"{len(self.rejected & set(self.session.keys()))} rejected")
+        copies = len(self.copy_cells)
+        if copies:
+            parts.append(f"+{copies} virtual cop{'ies' if copies != 1 else 'y'}")
         if self.session.purged:
             parts.append(f"{len(self.session.purged)} removed")
         if self.edit_folder is not None:
@@ -1301,10 +1449,11 @@ class CullWorkspace(Workspace):
         if self._thumb_worker is not None:
             self._thumb_worker.cancel()
             self._thumb_worker.wait()
-        if hasattr(self, "view_filter"):
-            self.view_filter.blockSignals(True)
-            self.view_filter.setCurrentIndex(0)
-            self.view_filter.blockSignals(False)
+        for combo in (getattr(self, "view_filter", None), getattr(self, "sort_combo", None)):
+            if combo is not None:
+                combo.blockSignals(True)
+                combo.setCurrentIndex(0)
+                combo.blockSignals(False)
         self.view_stack.setCurrentIndex(0)
         self.loupe_scroll.setVisible(False)
         while self.grid.count():
@@ -1312,10 +1461,12 @@ class CullWorkspace(Workspace):
             widget = item.widget()
             if widget is not None:
                 widget.deleteLater()
-        for cell in self._parked.values():
+        for cell in list(self._parked.values()) + list(self.copy_cells.values()):
             cell.deleteLater()
         self.cells.clear()
         self._parked.clear()
+        self.copy_cells.clear()
+        self._order = ()
 
         if not self.session.all_paths:
             self.status_label.setText("No supported images found in that folder.")
@@ -1326,12 +1477,13 @@ class CullWorkspace(Workspace):
         # hidden, in ``_parked``.
         for path in self.session.all_paths:
             cell = ThumbnailCell(str(path))
-            cell.clicked.connect(self._on_thumb_clicked)
+            cell.clicked.connect(self._on_master_clicked)
             cell.opened.connect(self.shell.open_in_develop)
             cell.web_toggled.connect(self._on_web_toggle)
             cell.menu_requested.connect(self._on_cell_menu)
             self.grid.addWidget(cell, 0, 0)
             (self._parked if str(path) in self.session.purged else self.cells)[str(path)] = cell
+        self._sync_copies(layout=False)
         self._layout_cells()
         self._refresh_marks()
         self._show_current()
@@ -1364,6 +1516,9 @@ class CullWorkspace(Workspace):
         cell = self.cells.get(path) or self._parked.get(path)
         if cell is not None:
             cell.set_pixmap(pixmap)
+        for (key, _version), copy in self.copy_cells.items():
+            if key == path:
+                copy.set_pixmap(pixmap)
 
     def _on_meta_ready(self, path: str, metadata: object) -> None:
         self.metadata[path] = metadata  # type: ignore[assignment]
@@ -1379,19 +1534,117 @@ class CullWorkspace(Workspace):
         self.progress.setVisible(False)
         self._refresh_status()
 
+    # -- virtual copy tiles --------------------------------------------------- #
+
+    def _sync_copies(self, layout: bool = True) -> None:
+        """One tile per virtual copy of each photo in the working set."""
+        wanted = {(e.key, e.version) for e in self.session.entries() if e.is_copy}
+        for tile in [t for t in self.copy_cells if t not in wanted]:
+            cell = self.copy_cells.pop(tile)
+            self.grid.removeWidget(cell)
+            cell.deleteLater()
+        changed = bool(set(self.copy_cells) ^ wanted)
+        for key, version in sorted(wanted - set(self.copy_cells)):
+            entry = self.session.entry(key, version)
+            cell = ThumbnailCell(key)
+            cell.version = version
+            cell.setText(entry.variant_key)
+            cell.web_checkbox.hide()                  # publishing is per photo
+            cell.clicked.connect(lambda _p, k=key, v=version: self._on_copy_clicked(k, v))
+            cell.opened.connect(lambda _p, k=key, v=version: self._open_version(k, v))
+            cell.menu_requested.connect(lambda _p, where, k=key, v=version: self._on_cell_menu(k, where, v))
+            parent = self.cells.get(key)
+            if parent is not None:
+                if parent.pixmap() is not None and not parent.pixmap().isNull():
+                    cell.set_pixmap(parent.pixmap())
+                if parent.metadata is not None:
+                    cell.set_metadata(parent.metadata)
+                    cell.set_tech_visible(self.tech_info_check.isChecked())
+            self.copy_cells[(key, version)] = cell
+        if layout and changed:
+            self._layout_cells()
+
+    # -- order and the Smart Priority divider ----------------------------------- #
+
+    def sort_mode(self) -> str:
+        combo = getattr(self, "sort_combo", None)
+        return combo.currentData() if combo is not None else session_topics.SORT_CAPTURE
+
+    def display_order(self) -> list[str]:
+        """The working set's photos in the order the grid shows them."""
+        return self.session.sorted_keys(self.sort_mode(), [k for k in self.session.keys() if k in self.cells])
+
+    def _tiles_in_order(self) -> list:
+        """Photo keys and (key, copy id) tiles, each photo followed by its copies."""
+        copies: dict[str, list[int]] = {}
+        for key, version in self.copy_cells:
+            copies.setdefault(key, []).append(version)
+        tiles = []
+        for key in self.display_order():
+            tiles.append(key)
+            tiles.extend((key, v) for v in sorted(copies.get(key, [])))
+        return tiles
+
+    def _sink(self) -> tuple[str | None, int]:
+        """Under Smart Priority: the first photo below the divider, and how
+        many are below it."""
+        if self.sort_mode() != session_topics.SORT_SMART_PRIORITY:
+            return None, 0
+        frames = self.session._frames_by_key()
+        order = self.display_order()
+        sunk = [k for k in order if self.session.priority(k, frames) >= session_topics.SINK_FROM]
+        return (sunk[0] if sunk else None), len(sunk)
+
+    def _signature(self) -> tuple:
+        return (tuple(self._tiles_in_order()), self._sink())
+
+    def _relayout_if_reordered(self) -> bool:
+        """Lay the grid out again when its order or divider changed. True if it did."""
+        if self._signature() == self._order:
+            return False
+        self._layout_cells()
+        return True
+
     # -- removing photos from the project --------------------------------------- #
 
     def _layout_cells(self) -> None:
-        """Place the working set's cells in folder order; hide the removed."""
-        for cell in list(self.cells.values()) + list(self._parked.values()):
+        """Place the working set's tiles in display order, each photo's
+        copies right after it; hide the removed. Under Smart Priority a
+        divider separates the keepers from what was culled."""
+        for cell in list(self.cells.values()) + list(self._parked.values()) + list(self.copy_cells.values()):
             self.grid.removeWidget(cell)
+        if self.divider is not None:
+            self.grid.removeWidget(self.divider)
+            self.divider.hide()
         columns = max(1, (self.grid_scroll.viewport().width() - 24) // (THUMB_SIZE + 24))
-        for index, path in enumerate(self.image_paths):
-            cell = self.cells.get(str(path))
+        tiles = self._tiles_in_order()
+        first_sunk, sunk = self._sink()
+        index = 0
+        for tile in tiles:
+            if tile == first_sunk:
+                if index % columns:
+                    index += columns - index % columns
+                if self.divider is None:
+                    self.divider = QLabel()
+                    self.divider.setObjectName("SinkDivider")
+                    self.divider.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                    self.divider.setStyleSheet(
+                        "color: #E31B23; font-weight: 700; font-size: 12px; padding: 10px 0;"
+                        " border-top: 1px solid #3a1a1c; background: transparent;")
+                self.divider.setText(
+                    f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500  \U0001F53B Culled & Flagged for Removal "
+                    f"({sunk:,} item{'s' if sunk != 1 else ''})  "
+                    "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500")
+                self.grid.addWidget(self.divider, index // columns, 0, 1, columns)
+                self.divider.show()
+                index += columns
+            cell = self.cells.get(tile) if isinstance(tile, str) else self.copy_cells.get(tile)
             if cell is not None:
                 self.grid.addWidget(cell, index // columns, index % columns)
+                index += 1
         for cell in self._parked.values():
             cell.setVisible(False)
+        self._order = (tuple(tiles), (first_sunk, sunk))
         self._apply_view_filter()
 
     def _sync_removed(self) -> None:
@@ -1401,6 +1654,7 @@ class CullWorkspace(Workspace):
         for key in [k for k in self._parked if k not in self.session.purged]:
             self.cells[key] = self._parked.pop(key)
         self.cells = {str(p): self.cells[str(p)] for p in self.image_paths if str(p) in self.cells}
+        self._sync_copies(layout=False)
         self._layout_cells()
 
     def removed_thumbnail(self, key: str):
@@ -1434,6 +1688,7 @@ class CullWorkspace(Workspace):
         if not self._confirm_remove(count):
             return 0
         removed = self.session.purge_rejected_images()
+        self.shell_log("cull", f"Removed {removed:,} culled photo{'s' if removed != 1 else ''} from the project")
         self.status_label.setText(
             f"Showing {self.session.total_images} keepers ({len(self.session.purged)} culled photo"
             f"{'s' if len(self.session.purged) != 1 else ''} removed). The files are untouched; "
@@ -1453,6 +1708,7 @@ class CullWorkspace(Workspace):
             return 0
         restored = self.session.restore_purged_images(dialog.chosen())
         if restored:
+            self.shell_log("cull", f"Restored {restored:,} removed photo{'s' if restored != 1 else ''}")
             self.status_label.setText(
                 f"Restored {restored} photo{'s' if restored != 1 else ''}. They are still marked "
                 "rejected; press P or use Keep Selected to keep them.")
@@ -1534,6 +1790,8 @@ class CullWorkspace(Workspace):
         def done(groups):
             starred = sum(1 for g in groups for f in g if f.is_starred)
             duplicates = sum(1 for g in groups for f in g if f.is_duplicate)
+            self.last_cull_frames = [f for g in groups for f in g]
+            self.shell_log("cull", f"Smart Cull: {starred:,} keepers starred, {duplicates:,} duplicates flagged")
             lines = [
                 f"Found {len(groups)} similar-image group(s) across {len(paths)} images.",
                 f"★ {starred} starred · {duplicates} flagged as duplicates.\n",
@@ -1563,6 +1821,7 @@ class CullWorkspace(Workspace):
                             duplicate=frame.is_duplicate,
                             detail=f"sharpness {frame.sharpness:,.0f}",
                         )
+            self._relayout_if_reordered()
 
         self._run_task(work, done, self.cull_button)
 
@@ -1631,6 +1890,8 @@ class CullWorkspace(Workspace):
                 )
             self.cull_results.setText("\n".join(lines))
             self._apply_cull_state_to_grid(frames)
+            self.shell_log("cull", f"Cull to target: {len(picks):,} keepers selected of {len(frames):,}")
+            self._relayout_if_reordered()
 
         self._run_task(work, done, self.cull_target_button)
 
@@ -1694,8 +1955,9 @@ class CullWorkspace(Workspace):
                 recipe = selective_colour_recipe(recipe, self.color_combo.currentText())
             else:
                 recipe = pr.with_look(self.filter_combo.currentText(), recipe)
-            self.session.set_recipe(path, recipe)
-        self.session.save_recipes()
+            self.session.set_recipe(path, recipe, label=f"Grade: {self.color_combo.currentText() if mode == 'Selective Color' else self.filter_combo.currentText()}")
+        self.session.save_all()
+        self.shell_log("develop", f"Colour grade on {len(targets):,} photos")
         self.color_status.setText(
             f"Applied to {len(targets)} photo(s) as an edit. Fine-tune it in Develop; "
             f"it is rendered at export and the originals are untouched."

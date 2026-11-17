@@ -133,6 +133,7 @@ class ThumbnailCell(QLabel):
     def __init__(self, path: str, parent=None):
         super().__init__(parent)
         self.path = path
+        self.version = 0                 # 0 for a photo's own tile; a copy id for a virtual copy's
         self.selected = False
         self.rejected = False
         # Remembered so the view filter can show just picks or duplicates.
@@ -193,8 +194,9 @@ class ThumbnailCell(QLabel):
             "background: rgba(10,11,14,0.80); border-radius: 6px; padding: 1px 6px; font-size: 11px;"
         )
         self.marks_tag.hide()
-        # Under the category label: how many versions the photo has, and
-        # which one is active ("v2/3"). Hidden while there is only the master.
+        # Under the category label: the tile's version chip. A virtual
+        # copy's tile shows "v2", "v3"; the parent shows "v1" once it has
+        # copies. Hidden while a photo has none.
         self.version_tag = QLabel(self)
         self.version_tag.setGeometry(w - 66, 30, 60, 20)
         self.version_tag.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -236,17 +238,30 @@ class ThumbnailCell(QLabel):
                         self.web_checkbox, self.reject_tag, self.blur_tag, self.marks_tag):
             overlay.raise_()
 
+    def _chip(self, text: str, tip: str, active: bool) -> None:
+        self.version_tag.setText(text)
+        self.version_tag.setToolTip(tip)
+        self.version_tag.setStyleSheet(
+            "background: rgba(10,11,14,0.85); color: #ffffff; border-radius: 6px; padding: 1px 4px;"
+            " font-size: 10px; font-weight: 700; border: 1px solid "
+            + ("#E31B23;" if active else "#5a5b61;"))
+        self.version_tag.show()
+        self.version_tag.raise_()
+
     def set_versions(self, names: list[str], active_index: int) -> None:
-        """Show the version badge: ``v2/3`` is the second of three versions."""
+        """The parent tile's chip: ``v1`` once the photo has virtual copies
+        (outlined in red while the master is the version shown)."""
         self.version_count = len(names)
         if len(names) < 2:
             self.version_tag.hide()
             return
-        self.version_tag.setText(f"v{active_index + 1}/{len(names)}")
-        self.version_tag.setToolTip("Versions: " + ", ".join(
-            f"{n} (shown)" if i == active_index else n for i, n in enumerate(names)))
-        self.version_tag.show()
-        self.version_tag.raise_()
+        copies = len(names) - 1
+        self._chip("v1", f"Master. {copies} virtual cop{'ies' if copies != 1 else 'y'} beside it: "
+                   + ", ".join(names[1:]), active_index == 0)
+
+    def set_copy_chip(self, chip: str, name: str, active: bool) -> None:
+        """A virtual copy's tile: ``v2`` with the copy's name as its tip."""
+        self._chip(chip, f"Virtual copy {chip}: {name}. Same original, its own edit.", active)
 
     def contextMenuEvent(self, event) -> None:  # noqa: N802 (Qt naming)
         self.menu_requested.emit(self.path, event.globalPos())

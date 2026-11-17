@@ -1,9 +1,10 @@
 """A strip of the working set along the bottom of an editing workspace.
 
-Shows every frame in the folder in order, dims the rejected ones, outlines
-the current one, and moves the current frame when one is clicked. It
-borrows the thumbnails the Cull grid has already decoded, so it costs
-nothing to keep up to date.
+Shows every frame in the folder in order, each followed by its virtual
+copies (with a small ``v2`` chip), dims the rejected ones, outlines the one
+being edited, and moves to a tile when it is clicked. It borrows the
+thumbnails the Cull grid has already decoded, so it costs nothing to keep up
+to date.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ from PyQt6.QtCore import QSize, Qt
 from PyQt6.QtWidgets import QHBoxLayout, QLabel, QScrollArea, QWidget
 
 STRIP_THUMB = 84
+MASTER = 0
 
 
 class Filmstrip(QScrollArea):
@@ -32,7 +34,15 @@ class Filmstrip(QScrollArea):
         self._row.setSpacing(4)
         self._row.addStretch()
         self.setWidget(self._host)
-        self._tiles: dict[str, QLabel] = {}
+        self._tiles: dict[str, QLabel] = {}          # tile id -> tile (a photo's key for its own)
+        self._entries: dict[str, object] = {}
+        # Copies made or removed anywhere, and switching between them, show here.
+        session.subscribe(lambda topic: self.refresh() if topic == "versions" else None)
+
+    def _choose(self, entry) -> None:
+        self.session.set_current(entry.key)
+        if self.session.version_count(entry.key) > 1:
+            self.session.set_active_version(entry.key, entry.version)
 
     def rebuild(self) -> None:
         while self._row.count():
@@ -40,25 +50,39 @@ class Filmstrip(QScrollArea):
             if item.widget() is not None:
                 item.widget().deleteLater()
         self._tiles.clear()
-        for key in self.session.keys():
+        self._entries.clear()
+        for entry in self.session.entries():
             tile = QLabel()
             tile.setFixedSize(QSize(STRIP_THUMB, STRIP_THUMB))
             tile.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            tile.setToolTip(Path(key).name)
+            tile.setToolTip(Path(entry.key).name if not entry.is_copy
+                            else f"{entry.variant_key} — virtual copy ({entry.name})")
             tile.setCursor(Qt.CursorShape.PointingHandCursor)
-            tile.mousePressEvent = lambda _event, k=key: self.session.set_current(k)
+            tile.mousePressEvent = lambda _event, e=entry: self._choose(e)
+            if entry.is_copy:
+                chip = QLabel(entry.chip, tile)
+                chip.setGeometry(STRIP_THUMB - 30, 4, 26, 16)
+                chip.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                chip.setStyleSheet("background: rgba(10,11,14,0.85); color: #fff; border: 1px solid #E31B23;"
+                                   " border-radius: 4px; font-size: 9px; font-weight: 700;")
             self._row.addWidget(tile)
-            self._tiles[key] = tile
+            self._tiles[entry.tile_id] = tile
+            self._entries[entry.tile_id] = entry
         self._row.addStretch()
         self.refresh()
 
     def refresh(self) -> None:
-        """Pick up newly decoded thumbnails and the current marks."""
-        if set(self._tiles) != set(self.session.keys()):
+        """Pick up newly decoded thumbnails, the marks and the copies."""
+        if set(self._tiles) != {e.tile_id for e in self.session.entries()}:
             self.rebuild()
             return
         current = self.session.current
-        for key, tile in self._tiles.items():
+        shown = None
+        if current is not None:
+            version = self.session.active_version(current)
+            shown = current if version == MASTER else f"{current}#v{version}"
+        for tile_id, tile in self._tiles.items():
+            key = self._entries[tile_id].key
             if tile.pixmap() is None or tile.pixmap().isNull():
                 pixmap = self._thumbnails(key)
                 if pixmap is not None and not pixmap.isNull():
@@ -67,9 +91,9 @@ class Filmstrip(QScrollArea):
                         Qt.TransformationMode.SmoothTransformation))
                 else:
                     tile.setText(Path(key).stem[:10])
-            border = "2px solid #ffffff" if key == current else "1px solid #2a2a2a"
+            border = "2px solid #ffffff" if tile_id == shown else "1px solid #2a2a2a"
             dim = "background: #2a0a0c;" if key in self.session.rejected else "background: #161616;"
             tile.setStyleSheet(f"QLabel {{ border: {border}; border-radius: 4px; {dim} color: #888; }}")
-        tile = self._tiles.get(current or "")
+        tile = self._tiles.get(shown or "")
         if tile is not None:
             self.ensureWidgetVisible(tile, 40, 0)

@@ -94,17 +94,26 @@ class ExportWorkspace(Workspace):
     def on_enter(self) -> None:
         self._refresh_counts()
 
+    def _selected_paths(self) -> list[Path]:
+        """Photos with any tile selected in Cull: their own, or a virtual copy's."""
+        keys = self.session.selected_photo_keys()
+        return [p for p in self.image_paths if str(p) in keys]
+
     def _refresh_counts(self) -> None:
         chosen = self._selected_paths()
         kept = [p for p in chosen if str(p) not in self.rejected]
         rejected = len(chosen) - len(kept)
         edited = sum(1 for p in kept if self.session.has_edits(p))
         copies = sum(self.session.version_count(p) - 1 for p in kept)
+        picked_copies = sum(1 for k, _ in self.session.selected_copies if k not in self.rejected)
         versions = ""
-        if copies:
-            versions = (f" Those frames carry {copies} extra version(s); "
-                        + ("each is exported as its own file."
-                           if self.every_version.isChecked() else "only the active version of each is exported."))
+        if copies and self.every_version.isChecked():
+            versions = f" Those frames carry {copies} extra version(s); each is exported as its own file."
+        elif picked_copies:
+            versions = (f" {picked_copies} selected virtual cop{'ies are' if picked_copies != 1 else 'y is'} "
+                        "exported as its own file.")
+        elif copies:
+            versions = f" Those frames carry {copies} extra version(s); only the active version of each is exported."
         self.files_count.setText(
             f"{len(kept)} selected frame(s) will be exported, {edited} of them edited"
             + (f"; {rejected} rejected frame(s) left out" if rejected else "")
@@ -141,10 +150,23 @@ class ExportWorkspace(Workspace):
         return FrameJob(path, recipe, context, inpainter, self.metadata.get(str(path)), variant)
 
     def _jobs(self, paths) -> list[FrameJob]:
-        """One job per frame, or per version of each frame when asked."""
-        if not self.every_version.isChecked():
-            return [self._job(path) for path in paths]
-        return [self._job(path, v.id) for path in paths for v in self.session.versions(path)]
+        """One job per frame, or per version of each frame when asked.
+
+        Otherwise each selected tile is one file: a selected virtual copy is
+        exported on its own, tagged ``_v2-…``; a photo selected by its own
+        tile alone exports the version it shows.
+        """
+        if self.every_version.isChecked():
+            return [self._job(path, v.id) for path in paths for v in self.session.versions(path)]
+        jobs = []
+        for path in paths:
+            key = str(path)
+            copies = sorted(v for k, v in self.session.selected_copies
+                            if k == key and v in {x.id for x in self.session.versions(key)})
+            if key in self.selected or not copies:
+                jobs.append(self._job(path) if not copies else self._job(path, 0))   # 0: the master
+            jobs.extend(self._job(path, v) for v in copies)
+        return jobs
 
     def _publishable(self, paths) -> list[Path]:
         """The images the publishing tools should read.
@@ -243,6 +265,10 @@ class ExportWorkspace(Workspace):
 
         def done(outcome):
             written, failures = outcome
+            log = getattr(type(self.shell), "log_action", None)
+            if log is not None and written:
+                log(self.shell, "export", f"Exported {len(written):,} image{'s' if len(written) != 1 else ''} "
+                    f"as {preset.name}")
             message = f"Exported {len(written)} image(s) to {out_dir}."
             if failures:
                 message += f" {len(failures)} could not be read: " + ", ".join(p.name for p, _ in failures[:5])
@@ -390,6 +416,9 @@ class ExportWorkspace(Workspace):
             return self.ig_formatter.export_batch(self._publishable(targets), out_dir, target=target)
 
         def done(written):
+            log = getattr(type(self.shell), "log_action", None)
+            if log is not None and written:
+                log(self.shell, "export", f"Exported {len(written):,} Instagram {target} images")
             self.reel_status.setText(f"Exported {len(written)} IG {target} image(s) to {out_dir}")
 
         self._run_task(work, done, self.ig_button)

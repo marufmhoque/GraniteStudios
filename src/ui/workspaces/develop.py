@@ -8,6 +8,7 @@ Keyboard, with the picture focused:
     0              fit to window               1          100 percent
     [ / ]          previous / next version     V          compare versions side by side
     Shift+V        compare with a different version
+    Ctrl+D         duplicate: a new virtual copy of the version being edited
 
 Every control edits the frame's recipe. The preview is rendered on a
 background thread from a proxy of the frame, with the same pipeline the
@@ -18,6 +19,10 @@ A photograph can have several versions (see the version bar above the
 picture). Develop edits whichever is active, and always writes back to the
 version it opened, so switching never lands one version's settings on
 another.
+
+The History section lists every recorded change to the version being
+edited, from any workspace, oldest first. Clicking a step puts the recipe
+back as it was then; that is recorded as a new step, and Ctrl+Z undoes it.
 """
 
 from __future__ import annotations
@@ -26,13 +31,17 @@ import logging
 from pathlib import Path
 
 import numpy as np
+from datetime import datetime
+
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
-    QCheckBox, QComboBox, QFileDialog, QGridLayout, QHBoxLayout, QLabel, QMessageBox, QPushButton,
-    QScrollArea, QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QFileDialog, QGridLayout, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
+    QMessageBox, QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
 from src.engine import develop_pipeline as dp
+from src.engine import edit_history as eh
 from src.engine import layer_stack
 from src.engine import parametric_recipe as pr
 from src.engine import session as topics
@@ -106,6 +115,9 @@ class DevelopWorkspace(Workspace):
         self.loader_job.ready.connect(self._on_source_loaded)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._build()
+        # Ctrl+D is Cmd+D on macOS: Qt maps it.
+        QShortcut(QKeySequence("Ctrl+D"), self, activated=self.duplicate,
+                  context=Qt.ShortcutContext.WidgetWithChildrenShortcut)
         self.session.subscribe(self.on_session)
 
     # -- layout -------------------------------------------------------------- #
@@ -190,6 +202,20 @@ class DevelopWorkspace(Workspace):
             button.setStyleSheet("padding: 6px 4px;")
             actions.addWidget(button, index // 3, index % 3)
         self.panel.addLayout(actions)
+
+        self.history_section = Section("History", expanded=False)
+        self.history_list = QListWidget()
+        self.history_list.setObjectName("HistoryList")
+        self.history_list.setMinimumHeight(160)
+        self.history_list.setToolTip("Every change to this version, oldest first. "
+                                     "Click a step to put the photo back as it was then.")
+        self.history_list.itemClicked.connect(self._on_history_clicked)
+        self.history_section.add(self.history_list)
+        self.history_note = QLabel("No edits yet.")
+        self.history_note.setObjectName("PageSubtitle")
+        self.history_note.setWordWrap(True)
+        self.history_section.add(self.history_note)
+        self.panel.addWidget(self.history_section)
 
         self.sliders: dict[tuple[str, str], SliderRow] = {}
         basic = Section("Basic")
@@ -364,6 +390,8 @@ class DevelopWorkspace(Workspace):
         if self.session.current != self.key or (
                 self.key is not None and self.session.active_version(self.key) != self.version):
             self.load(self.session.current)
+        else:
+            self._refresh_history()
         self.setFocus()
 
     def on_leave(self) -> None:
@@ -375,6 +403,9 @@ class DevelopWorkspace(Workspace):
             self._toggle_versions(False)
             self.canvas.set_image(None)
             self.filmstrip.rebuild()
+        elif topic == topics.RECIPE:
+            if self._is_shown():             # a batch elsewhere is caught up on entering
+                self._refresh_history()
         elif topic in (topics.CURRENT, topics.MARKS):
             self.filmstrip.refresh()
             if topic == topics.CURRENT and self.shell.__dict__.get("_current_index") is not None and self.shell.current_workspace is self and self.session.current != self.key:
@@ -390,6 +421,7 @@ class DevelopWorkspace(Workspace):
                     self._pick_sibling()
                     self._render()
                 self._show_names()
+            self._refresh_history()
 
     def _is_shown(self) -> bool:
         return self.shell.__dict__.get("_current_index") is not None and self.shell.current_workspace is self
@@ -403,6 +435,7 @@ class DevelopWorkspace(Workspace):
         self._before_key, self._sibling_key, self._layer_context = None, None, None
         self._load_controls()
         self._show_names()
+        self._refresh_history()
         if self._comparing_versions:
             self._pick_sibling()
         self._render()
@@ -430,10 +463,12 @@ class DevelopWorkspace(Workspace):
             self.source = None
             self.canvas.set_image(None)
             self.frame_label.setText("No photo open")
+            self._refresh_history()
             return
         self.version = self.session.active_version(key)
         self.recipe = self.session.recipe(key, self.version).copy()
         self._load_controls()
+        self._refresh_history()
         if self._comparing_versions:
             self._pick_sibling()
         self._show_names()
@@ -842,24 +877,90 @@ class DevelopWorkspace(Workspace):
         self._commit()
         self._clipboard = pr.to_dict(self.recipe)
         for path in targets:
-            self.session.set_recipe(path, self._settings_from_clipboard(self.session.recipe(path)))
-        self.session.save_recipes()
+            self.session.set_recipe(path, self._settings_from_clipboard(self.session.recipe(path)),
+                                    label=f"Synced from {Path(self.key).name}")
+        self.session.save_all()
+        log = getattr(type(self.shell), "log_action", None)
+        if log is not None:
+            log(self.shell, "develop", f"Synced settings from {Path(self.key).name} to {len(targets):,} photos")
         self.status_label.setText(
             f"Settings copied to {len(targets)} frame(s). Their crops, layers and overlays were kept.")
 
+    # -- virtual copies and history ---------------------------------------------- #
+
+    def duplicate(self):
+        """Ctrl+D: a new virtual copy of the version being edited, which
+        Develop then shows."""
+        if self.key is None:
+            return None
+        self._commit()
+        entry = self.session.create_virtual_copy(self.key, self.version)
+        self.status_label.setText(
+            f"Created virtual copy {entry.variant_key}. It starts with these settings; "
+            "no image data was duplicated.")
+        return entry
+
+    def _refresh_history(self) -> None:
+        if not hasattr(self, "history_list"):
+            return
+        self.history_list.clear()
+        steps = self.session.history(self.key, self.version).steps if self.key is not None else []
+        current = pr.to_dict(self.session.recipe(self.key, self.version)) if self.key is not None else None
+        for index, step in enumerate(steps):
+            try:
+                when = datetime.fromisoformat(step.time).astimezone().strftime("%d %b %H:%M")
+            except ValueError:
+                when = ""
+            item = QListWidgetItem(f"{step.label}" + (f"   \u00b7 {when}" if when else ""))
+            item.setData(Qt.ItemDataRole.UserRole, index)
+            self.history_list.addItem(item)
+        if steps:
+            # The step the photo is at now, if it matches one.
+            at = next((i for i in range(len(steps) - 1, -1, -1) if steps[i].recipe == current), None)
+            if at is not None:
+                self.history_list.setCurrentRow(at)
+            self.history_list.scrollToBottom()
+        self.history_note.setText(f"{len(steps)} step{'s' if len(steps) != 1 else ''}. Click one to go back to it."
+                                  if steps else "No edits yet.")
+
+    def _on_history_clicked(self, item) -> None:
+        self.restore_step(item.data(Qt.ItemDataRole.UserRole))
+
+    def restore_step(self, index: int) -> None:
+        """Put the version back as it was at a history step (undoable)."""
+        if self.key is None:
+            return
+        self._commit()
+        before = pr.to_dict(self.recipe)
+        restored = self.session.restore_history_step(self.key, self.version, index)
+        if pr.to_dict(restored) != before:
+            self._history.append(before)
+            del self._history[:-HISTORY_LIMIT]
+            self._future.clear()
+        self.recipe = restored.copy()
+        self._load_controls()
+        self._changed()
+        self.status_label.setText(f"Back to: {self.session.history(self.key, self.version).steps[index].label}")
+
     def undo(self) -> None:
         if self._history:
-            self._future.append(pr.to_dict(self.recipe))
-            self.recipe = pr.from_dict(self._history.pop())
-            self.session.set_recipe(self.key, self.recipe.copy(), self.version)
+            current = pr.to_dict(self.recipe)
+            self._future.append(current)
+            previous = self._history.pop()
+            self.recipe = pr.from_dict(previous)
+            self.session.set_recipe(self.key, self.recipe.copy(), self.version,
+                                    label="Undo: " + eh.describe_change(previous, current))
             self._load_controls()
             self._changed()
 
     def redo(self) -> None:
         if self._future:
-            self._history.append(pr.to_dict(self.recipe))
-            self.recipe = pr.from_dict(self._future.pop())
-            self.session.set_recipe(self.key, self.recipe.copy(), self.version)
+            current = pr.to_dict(self.recipe)
+            self._history.append(current)
+            following = self._future.pop()
+            self.recipe = pr.from_dict(following)
+            self.session.set_recipe(self.key, self.recipe.copy(), self.version,
+                                    label="Redo: " + eh.describe_change(current, following))
             self._load_controls()
             self._changed()
 

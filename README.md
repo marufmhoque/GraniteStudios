@@ -1,6 +1,6 @@
 # Granite Studios
 
-**Current version: v2.04**
+**Current version: v2.05**
 
 ### [⬇️ Download the installer](https://github.com/marufmhoque/GraniteStudios/releases/latest/download/Install-GraniteStudios.bat)
 
@@ -25,7 +25,7 @@ Six workspaces over one folder: **Cull**, **Develop**, **Retouch**, **Design**, 
 - 🖌️ **Retouch**: layers with seven blend modes, AI masks (subject, skin, teeth, eyes, sky…), healing, cloning, skin smoothing that keeps pores, and inpainting that fills straightened corners
 - ✍️ **Design**: vector text, shapes and watermarks that print sharp at any size and export to SVG and PDF
 - 💾 **Non-destructive**: every edit is a small settings file. Nothing is rendered until you export, and your originals are never modified, moved or deleted
-- 🔀 **Versions (virtual copies)**: branch any photo into several independent edits (a moody black-and-white and a warm colour grade of the same frame) without copying a single pixel, compare them side by side, and export each
+- 🔀 **Virtual copies**: **Ctrl+D** branches any photo into another independent edit (a moody black-and-white and a warm colour grade of the same frame) without copying a single pixel. Each copy is its own tile right beside the original, chipped `v2`, `v3`, compared side by side and exported on its own
 
 ## Granite Studios at a glance
 
@@ -51,8 +51,10 @@ Six workspaces over one folder: **Cull**, **Develop**, **Retouch**, **Design**, 
 | Cull | Sharpness on the faces, blink and smile from a 478-point mesh, duplicate and burst grouping, cull to a target count, survey and face loupe, group by person, ratings and labels written to `.xmp` |
 | Develop | 32-bit float engine: tone, curves, 8-band HSL, colour grading, dehaze, lens profiles, `.cube` LUTs, straighten, keystone, copy and sync settings, clipping view |
 | De-blur | True deconvolution of motion smear and missed focus (Richardson-Lucy, Wiener, optional NAFNet), auto-detected angle and length, subject- or face-only |
-| Projects | Named `.granite` projects that reopen where you stopped, a Project Hub of recent projects at launch, and **Remove Images** to clear rejected photos out of the project without touching the files |
-| Versions | Virtual copies of any photo: independent edits that share the original's pixels, one-click Cinematic / Warm Analog / Clean B&W branches, side-by-side compare, every version exported as its own file |
+| Projects | Named `.granite` projects that reopen where you stopped, a Project Hub of recent projects at launch, **Remove Images** to clear rejected photos out of the project without touching the files, and a **📋 History** drawer with the workflow checklist and a timeline of every batch operation |
+| Virtual copies | Independent edits that share the original's pixels, each its own tile beside the original (`v2`, `v3`), one-click Cinematic / Warm Analog / Clean B&W branches, side-by-side compare, every copy exported as its own file |
+| Smart Priority sort | Keepers on top (picks, then 5 stars down to 1, then unrated), and duplicates, blinks, blurry and rejected photos sunk below a *Culled & Flagged for Removal* divider |
+| Edit history | Develop's **History** lists every change to a photo, from any workspace, and goes back to any step with a click; kept with the folder's edits |
 | Retouch | Layers (7 blend modes), AI masks (subject, skin, teeth, eyes, iris, lips; hair and sky approximate), click-to-select, one-click Color Splash, healing, cloning, frequency-separation skin smoothing, teeth and eyes, neural inpainting |
 | Design | Vector text, shapes and bezier paths; watermark templates filled from each photo's EXIF; snapping and guides; SVG and PDF output |
 | Export | Web, full-size, 16-bit TIFF, print and 16-bit PNG presets; Instagram sets; panoramic reel; static web gallery; transparent-background PNG |
@@ -78,7 +80,7 @@ Six workspaces over one folder: **Cull**, **Develop**, **Retouch**, **Design**, 
 - Straightening: under **1 degree** residual from scene lines, **0.6 degree** mean from the body when there are no lines
 - Background removal **1.36 times faster** on DirectML than CPU
 - De-blurring recovers **+5.2 dB** on a synthetic 10 px motion smear; a full-quality pass takes about **4 s** on the 1,600 px preview and **66 s** on a 24 MP export (a fast Wiener pass follows the slider in about 150 ms)
-- **640 automated tests** against real engines, 20,300 lines of application code and 5,600 lines of tests
+- **667 automated tests** against real engines, 20,300 lines of application code and 5,600 lines of tests
 
 **What it cannot do yet** (full list with reasons in [PRD.md](PRD.md) section 8):
 
@@ -94,8 +96,8 @@ Six workspaces over one folder: **Cull**, **Develop**, **Retouch**, **Design**, 
 | Where | Keys |
 | --- | --- |
 | Anywhere | **Ctrl+1 to Ctrl+6** switch workspace; **Ctrl+N** new project; **Ctrl+O** open project; **Ctrl+S** save project |
-| Cull | Arrows move; **1-5** stars (0 clears); **6-9** red, yellow, green, blue; **P** pick; **X** reject; **U** clear; **S** survey; **F** face loupe; **Ctrl+'** new version; **Shift+Delete** remove rejected images; **Enter** open in Develop |
-| Develop | Left/Right change frame; **[ / ]** change version; **V** compare versions (**Shift+V** picks which); **\\** before/after; **J** clipping; **Ctrl+Z / Ctrl+Y** undo, redo; **Ctrl+Shift+C / V** copy, paste settings; **0** fit; **1** 100% |
+| Cull | Arrows move; **1-5** stars (0 clears); **6-9** red, yellow, green, blue; **P** pick; **X** reject; **U** clear; **S** survey; **F** face loupe; **Ctrl+D** (or **Ctrl+'**) duplicate as a virtual copy; **Shift+Delete** remove rejected images; **Enter** open in Develop |
+| Develop | Left/Right change frame; **[ / ]** change version; **V** compare versions (**Shift+V** picks which); **\\** before/after; **J** clipping; **Ctrl+Z / Ctrl+Y** undo, redo; **Ctrl+D** new virtual copy; **Ctrl+Shift+C / V** copy, paste settings; **0** fit; **1** 100% |
 
 **Where to go next:** [Quick Start](#quick-start) to install, [Features](#features) for every control, [Architecture Highlights](#architecture-highlights) for how edits are stored, and [PRD.md](PRD.md) for every requirement with its evidence.
 
@@ -248,6 +250,7 @@ filmstrip along the bottom.
 - **Select All / None / Invert**, scoped to whatever the view filter is showing
 - **Rejected never means deleted.** The original file is never moved, renamed or removed; it is simply left out of every export
 - **Review Rejected** shows every rejected frame before anything is acted on, with a tick per photo to put it back
+- **Sort: Smart Priority (Keepers First)** puts picks first, then 5-star down to 1-star and AI-starred photos, then unrated keepers. Below a **🔻 Culled & Flagged for Removal (X items)** divider come duplicates, blinks, blurry frames and the rejected, in that order, so you can see exactly what Remove Images will take. A rejected photo never counts as a keeper, whatever its stars. *Capture Order* is the folder's order
 - **Remove Images** (Shift+Delete) clears every rejected photo out of the project after one confirmation: it leaves the grid, the filmstrips, every count and every export, and the status bar says how many keepers remain. The files stay on disk exactly as they were. **View ▸ Restore Removed Images** lists them with a tick each and brings them back with their ratings and edits
 
 ### Projects
@@ -255,6 +258,7 @@ filmstrip along the bottom.
 - A project reopens where you stopped: the workspace, the selected photo and the removed images. Ratings, rejects and edits stay in the folder's `-edit` subfolder as always, so the folder opened on its own still shows all the work
 - **The Project Hub** at launch has New Project, Open Existing Project, and your recent projects with a thumbnail, photo and keeper counts and when each was last opened. Tick **Always reopen last active project on startup** to skip it
 - **File ▸ Open Project** (Ctrl+O), **Save Project** (Ctrl+S; with no project open it offers to make one from the open folder) and **Recent Projects**. Projects also save themselves on close and after removing or restoring images
+- **📋 History** (top right) slides out the project's activity drawer: a **workflow checklist** (Ingest, Cull, Blur Triage, Auto-Level, Develop with *X/Y completed*, Export) and a **timeline** of every batch operation with its time ("Smart Cull: 420 keepers starred", "Removed 1,200 culled photos"). It is saved in the `.granite` file; work done before a project existed is kept by a project made from that folder
 - A project holds one folder for now (the file format already allows several)
 - **Show:** filters the grid to *Keepers*, *AI picks*, *Duplicates*, *Rejected*, *Blurry*, *Motion blur* or *Out of focus*, and to one person after **Group by Person**
 
@@ -265,7 +269,7 @@ filmstrip along the bottom.
 - **Looks and LUTs**: the six original grades as adjustable looks, and any 3D `.cube` LUT, each with a strength slider
 - **Detail**: sharpening and noise reduction, and **De-Blur** (below). **Lens**: automatic distortion, colour-fringe and vignetting correction from the lens database when the camera and lens are known, manual sliders when not
 - **Crop and straighten**: quarter turns, flip, straighten, vertical and horizontal keystone, aspect crops
-- **Before / After (\\)**, **clipping view (J)** showing lost shadows in blue and blown highlights in red, a live RGB histogram, **undo and redo** (Ctrl+Z / Ctrl+Y), **copy and paste settings**, and **Sync** to copy the settings to every selected frame (crops and retouching stay with their own photo)
+- **Before / After (\\)**, **clipping view (J)** showing lost shadows in blue and blown highlights in red, a live RGB histogram, **undo and redo** (Ctrl+Z / Ctrl+Y), **History** (every change to the photo, from any workspace, with its time; click a step to go back to it, which is itself a step you can undo), **copy and paste settings**, and **Sync** to copy the settings to every selected frame (crops and retouching stay with their own photo)
 - RAW files develop from 16-bit linear sensor data in 32-bit float. Highlights roll off rather than clip when exposure is pushed
 
 ### De-Blur
@@ -277,13 +281,13 @@ Sharpening lifts edges that survived. **De-Blur** (Develop ▸ Detail) undoes th
 - While you drag a slider a fast Wiener filter follows it (about 150 ms on a laptop); when you let go, damped Richardson-Lucy renders the full-quality result (about 4 s). It runs in linear light, before lens correction and tone, exactly as the export does
 - It recovers detail the blur weakened, not detail it erased. Long smears, a wrong angle and blur that differs across the frame (a moving subject against a still background) limit it. It stays with its own photo when you copy, paste or sync settings
 
-### Versions (virtual copies)
-- **Branch a photo into several edits.** A version is a second set of settings for the same original: making one copies only the small settings file, never the pixels. Edit *Copy 1* as a high-contrast black and white and the *Master* as a warm colour grade; neither touches the other
+### Virtual copies (versions)
+- **Branch a photo into several edits.** A virtual copy is a second set of settings for the same original: **Ctrl+D** (Cull or Develop), or right-click ▸ **Duplicate / Create Virtual Copy**, copies only the small settings file, never the pixels. Edit the copy as a high-contrast black and white and the original as a warm colour grade; neither touches the other
+- **Each copy is its own tile**, right after the original in the grid and the filmstrips: the original is chipped `v1`, its copies `v2`, `v3` (`DSC_0001_v2`). Click a copy's tile to edit it and to select it for export; right-click it to rename or delete it. Ratings, labels, picks and rejection belong to the photo, so they are shared
 - **The version bar** sits above the picture in Develop, Retouch and Design: a pill per version (`Master`, `Copy 1`, `Moody Edit`…). Click one to switch to it; nothing is lost when you do. **+ Version** branches the one you are looking at; **⋯** (or right-click a pill) renames or removes it
-- **+ 3 Styles** branches *Cinematic*, *Warm Analog* and *Clean B&W* from the master in one click, keeping its crop, lens corrections, retouching and watermark. In Cull, the **Versions ▾** menu or a right-click does the same for a whole selection, and **Ctrl+'** makes a copy
+- **+ 3 Styles** branches *Cinematic*, *Warm Analog* and *Clean B&W* from the master in one click, keeping its crop, lens corrections, retouching and watermark. In Cull, the **Versions ▾** menu or a right-click does the same for a whole selection
 - **Compare (V)** puts another version beside the one you are editing, zoom and pan locked together; **Shift+V** steps through the others, **[** and **]** switch which one you edit
-- The **grid badge** `v2/3` says a photo has three versions and the second is showing
-- **Export** writes every version as its own file (`IMG_1_v2-moody-edit.jpg`), or only the active one if you untick *Export every version*. Ratings, labels and rejection belong to the photo, so a rejected photo exports no versions
+- **Export** writes every version as its own file (`IMG_1_v2-moody-edit.jpg`, numbered like the chips), or, if you untick *Export every version*, just the tiles you selected: a selected copy is written on its own. Ratings, labels and rejection belong to the photo, so a rejected photo exports no versions
 
 ### Retouch
 - **Layers** with opacity and seven blend modes (normal, multiply, screen, overlay, soft light, colour dodge, luminosity), shown in a panel you can reorder and hide
@@ -419,7 +423,7 @@ python tests/fetch_media.py   # optional: CC0 camera RAW samples and reference f
 pytest
 ```
 
-**640 tests.** They drive the real engines and the real window (headless,
+**667 tests.** They drive the real engines and the real window (headless,
 with `QT_QPA_PLATFORM=offscreen`); nothing is mocked except file dialogs.
 Tests that need a downloaded model or sample file are marked `model` or
 `media` and skip themselves when it is absent.

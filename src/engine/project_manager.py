@@ -13,6 +13,13 @@ project (``purged_paths``) hides it; the file is never touched.
 
 A project wraps one folder for now. ``source_directories`` is a list so
 the format can grow to several folders without a new version.
+
+Audit trail
+-----------
+``audit_log`` records each batch operation with its time ("Smart Cull: 420
+keepers starred", "Removed 1,200 culled photos"), and ``stage_status``
+which workflow stages are done. :func:`workflow_checklist` turns them, with
+the session, into the checklist the History drawer shows.
 """
 
 from __future__ import annotations
@@ -33,6 +40,18 @@ PROJECT_SUFFIX = ".granite"
 FORMAT_VERSION = 1
 RECENT_LIMIT = 12
 NAME_LIMIT = 80
+AUDIT_LIMIT = 1000
+
+# The workflow, in order, with the name each stage is shown under.
+STAGES = {
+    "ingest": "Ingest",
+    "cull": "Cull",
+    "blur_triage": "Blur Triage",
+    "auto_level": "Auto-Level",
+    "develop": "Develop",
+    "export": "Export",
+}
+DONE, IN_PROGRESS, NOT_STARTED, PENDING = "Done", "In Progress", "Not Started", "Pending"
 
 
 class ProjectError(Exception):
@@ -41,6 +60,46 @@ class ProjectError(Exception):
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def make_entry(stage: str, description: str, when: str | None = None) -> dict:
+    """One line of the audit log."""
+    return {"time": when or _now(), "stage": str(stage), "description": str(description)}
+
+
+def workflow_checklist(session, stage_status: dict | None = None) -> list[tuple[str, str, str, str]]:
+    """``(stage, name, status, detail)`` for each workflow stage, in order.
+
+    Cull, Blur Triage and Auto-Level are done once they have run; Develop is
+    worked out from the photos (keepers with edits out of all keepers);
+    Export is pending until something has been exported.
+    """
+    done = {k for k, v in (stage_status or {}).items() if v == DONE}
+    keys = session.keys() if session is not None else []
+    keepers = [k for k in keys if k not in session.rejected] if keys else []
+    rows = []
+    for stage, name in STAGES.items():
+        detail = ""
+        if stage == "ingest":
+            status = DONE if keys or stage in done else NOT_STARTED
+            if keys:
+                detail = f"{len(keys):,} photo{'s' if len(keys) != 1 else ''}"
+        elif stage == "develop":
+            edited = sum(1 for k in keepers if any(session.has_edits(k, v.id) for v in session.versions(k)))
+            if not edited:
+                status = NOT_STARTED
+            elif edited >= len(keepers):
+                status = DONE
+            else:
+                status = IN_PROGRESS
+            if keepers:
+                detail = f"{edited:,}/{len(keepers):,} completed"
+        elif stage == "export":
+            status = DONE if stage in done else PENDING
+        else:
+            status = DONE if stage in done else NOT_STARTED
+        rows.append((stage, name, status, detail))
+    return rows
 
 
 def safe_filename(name: str) -> str:
@@ -81,6 +140,8 @@ class GraniteProject:
     purged_paths: list[str] = field(default_factory=list)
     active_workspace: str = "Cull"
     last_selected_image: str | None = None
+    audit_log: list[dict] = field(default_factory=list)            # {time, stage, description}
+    stage_status: dict[str, str] = field(default_factory=dict)     # stage -> "Done"
 
     # -- the photos ---------------------------------------------------------- #
 
@@ -118,6 +179,26 @@ class GraniteProject:
         elif session.current in session.purged:
             session.set_current(session.image_paths[0] if session.image_paths else None)
 
+    # -- the audit trail ---------------------------------------------------------- #
+
+    def log_action(self, stage: str, description: str, when: str | None = None) -> dict:
+        """Record a batch operation and mark its stage done. Saving is the
+        caller's job."""
+        entry = make_entry(stage, description, when)
+        self.audit_log.append(entry)
+        del self.audit_log[:-AUDIT_LIMIT]
+        if stage in STAGES:
+            self.stage_status[stage] = DONE
+        return entry
+
+    def adopt(self, entries) -> None:
+        """Take log entries made before the project existed."""
+        for entry in entries:
+            self.log_action(entry["stage"], entry["description"], entry.get("time"))
+
+    def workflow_checklist(self, session) -> list[tuple[str, str, str, str]]:
+        return workflow_checklist(session, self.stage_status)
+
     # -- the file -------------------------------------------------------------- #
 
     def to_dict(self) -> dict:
@@ -132,6 +213,8 @@ class GraniteProject:
             "purged_paths": list(self.purged_paths),
             "active_workspace": self.active_workspace,
             "last_selected_image": self.last_selected_image,
+            "audit_log": list(self.audit_log),
+            "stage_status": dict(self.stage_status),
         }
 
     def save_project(self, session=None, workspace: str | None = None) -> Path:
@@ -185,6 +268,8 @@ def load_project(project_path: str | Path) -> GraniteProject:
         raise ProjectError(f"{path.name} does not say which folder it holds.")
     manifest = data.get("image_manifest")
     purged = data.get("purged_paths")
+    log = data.get("audit_log")
+    stages = data.get("stage_status")
     return GraniteProject(
         project_name=(text("project_name", "") or path.stem)[:NAME_LIMIT],
         path=path,
@@ -196,6 +281,11 @@ def load_project(project_path: str | Path) -> GraniteProject:
         purged_paths=[p for p in purged if isinstance(p, str)] if isinstance(purged, list) else [],
         active_workspace=text("active_workspace", "Cull"),
         last_selected_image=text("last_selected_image", None),
+        audit_log=[make_entry(e["stage"], e["description"], e["time"]) for e in log
+                   if isinstance(e, dict) and all(isinstance(e.get(k), str) for k in ("time", "stage", "description"))
+                   ][-AUDIT_LIMIT:] if isinstance(log, list) else [],
+        stage_status={k: v for k, v in stages.items() if k in STAGES and v == DONE}
+        if isinstance(stages, dict) else {},
     )
 
 

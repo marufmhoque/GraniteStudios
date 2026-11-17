@@ -278,10 +278,11 @@ def test_style_names_are_checked():
 # --------------------------------------------------------------------- #
 
 def test_version_tags_for_file_names():
+    # Numbered like the grid chips: the master is v1, copy 1 is v2.
     assert export_presets.version_tag(MASTER, "Master") == ""
-    assert export_presets.version_tag(2, "Moody Edit") == "v2-moody-edit"
-    assert export_presets.version_tag(3, "Clean B&W") == "v3-clean-b-w"
-    assert export_presets.version_tag(4, "!!!") == "v4"
+    assert export_presets.version_tag(1, "Moody Edit") == "v2-moody-edit"
+    assert export_presets.version_tag(2, "Clean B&W") == "v3-clean-b-w"
+    assert export_presets.version_tag(3, "!!!") == "v4"
 
 
 # --------------------------------------------------------------------- #
@@ -371,13 +372,16 @@ def test_grid_badge_and_right_click_menu(harness):
     w.cull.setFocus()
     QTest.keyClick(w.cull, Qt.Key.Key_Apostrophe, Qt.KeyboardModifier.ControlModifier)
     assert w.session.version_count(key) == 2
-    assert not cell.version_tag.isHidden() and cell.version_tag.text() == "v2/2"
+    # The parent says v1; the copy is a tile of its own, saying v2.
+    assert not cell.version_tag.isHidden() and cell.version_tag.text() == "v1"
+    copy_cell = w.cull.copy_cells[(key, 1)]
+    assert copy_cell.version_tag.text() == "v2"
     menu = w.cull.version_menu(key)
     labels = [a.text() for a in menu.actions()]
-    assert "Create Version" in labels and "Create 3 Style Versions" in labels
+    assert "Duplicate / Create Virtual Copy" in labels and "Create 3 Style Versions" in labels
     show = next(a.menu() for a in menu.actions() if a.text() == "Show Version")
     next(a for a in show.actions() if a.text() == "Master").trigger()
-    assert w.session.active_version(key) == MASTER and cell.version_tag.text() == "v1/2"
+    assert w.session.active_version(key) == MASTER and cell.version_tag.text() == "v1"
     harness.select("IMG_0003.jpg", "IMG_0004.jpg")
     assert w.cull.create_style_versions(w.cull._mark_targets()) == 6
     assert w.session.version_count(_key(harness, "IMG_0004.jpg")) == 4
@@ -431,8 +435,8 @@ def test_every_version_is_exported_as_its_own_file(harness, before):
     assert "1 extra version" in w.export.files_count.text()
     harness.run(w.export._on_export_files)
     names = sorted(p.name for p in harness.out_dir.iterdir())
-    assert names == ["IMG_0001.jpg", "IMG_0001_v1-moody-edit.jpg", "IMG_0003.jpg"]
-    copy = cv2.imread(str(harness.out_dir / "IMG_0001_v1-moody-edit.jpg")).astype(np.int16)
+    assert names == ["IMG_0001.jpg", "IMG_0001_v2-moody-edit.jpg", "IMG_0003.jpg"]
+    copy = cv2.imread(str(harness.out_dir / "IMG_0001_v2-moody-edit.jpg")).astype(np.int16)
     master = cv2.imread(str(harness.out_dir / "IMG_0001.jpg")).astype(np.int16)
     assert np.abs(copy[:, :, 0] - copy[:, :, 2]).mean() < 3 < np.abs(master[:, :, 0] - master[:, :, 2]).mean()
 

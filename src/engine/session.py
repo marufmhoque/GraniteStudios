@@ -36,6 +36,26 @@ too. Version names and which one is active are kept in the session file;
 the copies themselves are found from their recipe files as well, so a lost
 session file loses only the names. Ratings, labels, picks and rejection
 belong to the photograph and are shared by all of its versions.
+
+Virtual copies
+--------------
+Every copy is also shown as its own tile, right after its parent
+(:meth:`LibrarySession.entries`): ``DSC_0001.jpg`` is v1 and its first copy
+is ``DSC_0001_v2``. Selecting a copy's tile selects that copy for export
+(``selected_copies``); choosing it makes it the active version. Only the
+recipe is copied; no image data is ever duplicated on disk.
+
+Edit history
+------------
+Every finished change to a recipe, from any workspace, is recorded as a step
+in the photo version's history (see edit_history), kept in the edit folder
+and listed by the Develop History panel.
+
+Smart Priority sort
+-------------------
+:meth:`LibrarySession.sorted_keys` with :data:`SORT_SMART_PRIORITY` puts the
+keepers first and sinks what the cull, blink and blur passes flagged, and the
+rejected, to the bottom (see :meth:`LibrarySession.priority`).
 """
 
 from __future__ import annotations
@@ -46,6 +66,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from src.engine import edit_history as eh
 from src.engine import parametric_recipe as pr
 from src.engine.parametric_recipe import Recipe
 
@@ -63,6 +84,18 @@ MASTER = pr.MASTER
 MASTER_NAME = "Master"
 NAME_LIMIT = 40
 
+# Grid order.
+SORT_CAPTURE = "capture"                # folder order
+SORT_SMART_PRIORITY = "smart"           # keepers first, the culled and rejected sink
+# Smart Priority ranks, best first.
+PRIORITY_KEEPER_MARKED = 1              # picked, rated or AI-starred
+PRIORITY_KEEPER = 2                     # an unrated keeper
+PRIORITY_DUPLICATE = 3
+PRIORITY_BLINK = 4
+PRIORITY_BLURRY = 5
+PRIORITY_REJECTED = 6
+SINK_FROM = PRIORITY_DUPLICATE          # from here down: culled and flagged for removal
+
 
 @dataclass(frozen=True)
 class Version:
@@ -72,6 +105,42 @@ class Version:
     @property
     def is_master(self) -> bool:
         return self.id == MASTER
+
+
+@dataclass(frozen=True)
+class VirtualImage:
+    """One tile in the grid: a photograph's master, or one virtual copy of it."""
+
+    path: Path
+    version: int = MASTER
+    name: str = MASTER_NAME
+
+    @property
+    def key(self) -> str:
+        return str(self.path)
+
+    @property
+    def is_copy(self) -> bool:
+        return self.version != MASTER
+
+    @property
+    def number(self) -> int:
+        """The master is v1, the first copy v2."""
+        return self.version + 1
+
+    @property
+    def chip(self) -> str:
+        return f"v{self.number}"
+
+    @property
+    def variant_key(self) -> str:
+        """``DSC_0001`` for the master, ``DSC_0001_v2`` for its first copy."""
+        stem = Path(self.path).stem
+        return f"{stem}_{self.chip}" if self.is_copy else stem
+
+    @property
+    def tile_id(self) -> str:
+        return self.key if not self.is_copy else f"{self.key}#v{self.version}"
 
 
 class LibrarySession:
@@ -84,6 +153,7 @@ class LibrarySession:
         self.image_paths: list[Path] = []          # the working set: all_paths less the removed
         self.purged: set[str] = set()              # removed from the working set; files untouched
         self.selected: set[str] = set()
+        self.selected_copies: set[tuple[str, int]] = set()   # (photo, copy id) tiles selected
         self.rejected: set[str] = set()
         self.picks: set[str] = set()
         self.ratings: dict[str, int] = {}
@@ -99,6 +169,9 @@ class LibrarySession:
         self._dirty: set[tuple[str, int]] = set()
         self._copies: dict[str, dict[int, str]] = {}   # photo -> {copy id: name}
         self._active: dict[str, int] = {}
+        self._histories: dict[tuple[str, int], eh.EditHistory] = {}
+        self._history_dirty: set[tuple[str, int]] = set()
+        self._baseline: dict[tuple[str, int], dict] = {}   # each recipe as last recorded
         self._listeners: list[Callable[[str], None]] = []
 
     # -- listeners --------------------------------------------------------- #
@@ -122,10 +195,12 @@ class LibrarySession:
         self.edit_folder = loader.get_edit_folder(self.current_folder)
         self.all_paths = loader.scan_folder(self.current_folder)
         self.image_paths = list(self.all_paths)
-        for store in (self.selected, self.rejected, self.picks, self.web_selected, self._dirty, self.purged):
+        for store in (self.selected, self.rejected, self.picks, self.web_selected, self._dirty, self.purged,
+                      self.selected_copies, self._history_dirty):
             store.clear()
         for store in (self.ratings, self.color_labels, self.labels, self.metadata,
-                      self.blur_reports, self._recipes, self._copies, self._active):
+                      self.blur_reports, self._recipes, self._copies, self._active,
+                      self._histories, self._baseline):
             store.clear()
         self.last_cull_frames = []
         self.people = None
@@ -178,6 +253,7 @@ class LibrarySession:
             return 0
         self.purged.update(targets)
         self.selected.difference_update(targets)
+        self.selected_copies = {(k, v) for k, v in self.selected_copies if k not in self.purged}
         self._apply_purge()
         self.save_state()
         self.notify(PURGED)
@@ -347,14 +423,65 @@ class LibrarySession:
                 number += 1
             wanted = f"Copy {number}"
         copies[new_id] = wanted
+        origin = self.active_version(key) if source is None else source
         if recipe is None:
-            recipe = self.recipe(key, self.active_version(key) if source is None else source)
-        self._recipes[(key, new_id)] = recipe.copy()
-        self._dirty.add((key, new_id))
+            recipe = self.recipe(key, origin)
+        slot = (key, new_id)
+        self._recipes[slot] = recipe.copy()
+        self._dirty.add(slot)
+        snapshot = pr.to_dict(self._recipes[slot])
+        self._baseline[slot] = snapshot
+        history = eh.EditHistory()
+        try:
+            source_name = self.version_name(key, origin)
+        except KeyError:
+            source_name = MASTER_NAME
+        history.record(f"Virtual copy of {source_name}", snapshot)
+        self._histories[slot] = history
+        self._history_dirty.add(slot)
         if activate:
             self._active[key] = new_id
         self.notify(VERSIONS)
         return new_id
+
+    def create_virtual_copy(self, source_path: str | Path, version: int | None = None) -> VirtualImage:
+        """Duplicate a photo as a virtual copy and return its tile.
+
+        The copy points at the same file; only the edit recipe of
+        ``version`` (by default the active one) is copied into the copy's own
+        recipe file. It becomes the active version, and is written straight
+        away. No image data is ever copied.
+        """
+        key = str(source_path)
+        new_id = self.create_version(key, source=version)
+        self.save_all()
+        return VirtualImage(Path(key), new_id, self.version_name(key, new_id))
+
+    def entry(self, path: str | Path, version: int = MASTER) -> VirtualImage:
+        return VirtualImage(Path(path), version, self.version_name(path, version))
+
+    def entries(self, paths=None) -> list[VirtualImage]:
+        """Every tile: each photo, followed straight away by its copies."""
+        out = []
+        for path in (self.image_paths if paths is None else paths):
+            key = str(path)
+            out.append(VirtualImage(Path(key)))
+            for copy_id, name in sorted(self._copies.get(key, {}).items()):
+                out.append(VirtualImage(Path(key), copy_id, name))
+        return out
+
+    def copy_count(self, paths=None) -> int:
+        keys = self.keys() if paths is None else [str(p) for p in paths]
+        return sum(len(self._copies.get(k, {})) for k in keys)
+
+    def selected_entries(self) -> list[VirtualImage]:
+        """The selected tiles, in grid order."""
+        return [e for e in self.entries()
+                if (e.key in self.selected if not e.is_copy else (e.key, e.version) in self.selected_copies)]
+
+    def selected_photo_keys(self) -> set[str]:
+        """Photos with any tile selected: the master's or a copy's."""
+        return set(self.selected) | {k for k, _ in self.selected_copies}
 
     def create_style_versions(self, path: str | Path, styles=None, activate: bool = True) -> list[int]:
         """One copy per style, each built on the master. Returns their ids."""
@@ -396,9 +523,14 @@ class LibrarySession:
             del self._copies[key]
         self._recipes.pop((key, version), None)
         self._dirty.discard((key, version))
+        self._histories.pop((key, version), None)
+        self._history_dirty.discard((key, version))
+        self._baseline.pop((key, version), None)
+        self.selected_copies.discard((key, version))
         if self._active.get(key) == version:
             self._active.pop(key, None)
         if self.edit_folder is not None:
+            eh.discard(key, self.edit_folder, version)
             try:
                 pr.discard(key, self.edit_folder, version)
             except OSError as exc:
@@ -419,18 +551,126 @@ class LibrarySession:
             self._recipes[slot] = (
                 pr.load(slot[0], self.edit_folder, slot[1]) if self.edit_folder is not None else Recipe()
             )
+            self._baseline.setdefault(slot, pr.to_dict(self._recipes[slot]))
         return self._recipes[slot]
 
-    def set_recipe(self, path: str | Path, recipe: Recipe, version: int | None = None) -> None:
+    def set_recipe(self, path: str | Path, recipe: Recipe, version: int | None = None,
+                   label: str | None = None) -> None:
+        """Replace a version's recipe. The change is recorded in its history,
+        as ``label`` or, by default, a description of what changed."""
         slot = (str(path), self._version(path, version))
+        if slot not in self._baseline:
+            self.recipe(*slot)                 # what it was, for the history
         self._recipes[slot] = recipe
         self._dirty.add(slot)
+        self._record(slot, label)
         self.notify(RECIPE)
 
-    def touch(self, path: str | Path, version: int | None = None) -> None:
+    def touch(self, path: str | Path, version: int | None = None, label: str | None = None) -> None:
         """Record that a recipe was edited in place."""
-        self._dirty.add((str(path), self._version(path, version)))
+        slot = (str(path), self._version(path, version))
+        self._dirty.add(slot)
+        if slot in self._recipes:
+            self._record(slot, label)
         self.notify(RECIPE)
+
+    # -- edit history ------------------------------------------------------------ #
+
+    def history(self, path: str | Path, version: int | None = None) -> eh.EditHistory:
+        """The recorded steps of a version (the active one by default)."""
+        slot = (str(path), self._version(path, version))
+        if slot not in self._histories:
+            self._histories[slot] = (eh.EditHistory.load(eh.history_path(slot[0], self.edit_folder, slot[1]))
+                                     if self.edit_folder is not None else eh.EditHistory())
+        return self._histories[slot]
+
+    def _record(self, slot: tuple[str, int], label: str | None) -> None:
+        after = pr.to_dict(self._recipes[slot])
+        neutral = pr.to_dict(Recipe())
+        history = self.history(*slot)
+        if not history.steps:
+            before = self._baseline.get(slot) or neutral
+            if before == after:
+                return
+            history.record("Original" if before == neutral else "Starting point", before)
+        if not label:
+            label = "Reset" if after == neutral else eh.describe_change(history.latest, after)
+        if history.record(label, after):
+            self._history_dirty.add(slot)
+        self._baseline[slot] = after
+
+    def restore_history_step(self, path: str | Path, version: int | None, index: int) -> Recipe:
+        """Put a version's recipe back as it was at step ``index``. Recorded
+        as a new step, so the steps after it are kept."""
+        version = self._version(path, version)
+        step = self.history(path, version).steps[index]
+        recipe = pr.from_dict(step.recipe)
+        self.set_recipe(path, recipe, version, label=f"Back to: {step.label}")
+        return recipe
+
+    def save_histories(self) -> int:
+        if self.edit_folder is None:
+            return 0
+        written = 0
+        for key, version in sorted(self._history_dirty):
+            if version != MASTER and version not in self._copies.get(key, {}):
+                continue
+            self._histories[(key, version)].save(eh.history_path(key, self.edit_folder, version))
+            written += 1
+        self._history_dirty.clear()
+        return written
+
+    # -- Smart Priority sort ---------------------------------------------------- #
+
+    def _frames_by_key(self) -> dict:
+        return {str(getattr(f, "path", "")): f for f in (self.last_cull_frames or [])}
+
+    def priority(self, path: str | Path, frames: dict | None = None) -> int:
+        """Where a photo sorts under Smart Priority, 1 (best) to 6.
+
+        1 picked, rated or AI-starred keepers; 2 unrated keepers; 3
+        duplicates; 4 blinks; 5 blurry or out of focus; 6 rejected for no
+        other reason. A rejected photo never counts as a keeper, whatever
+        its stars.
+        """
+        key = str(path)
+        frame = (self._frames_by_key() if frames is None else frames).get(key)
+        rejected = key in self.rejected
+        if not rejected and (key in self.picks or self.ratings.get(key) or getattr(frame, "is_starred", False)):
+            return PRIORITY_KEEPER_MARKED
+        if getattr(frame, "is_duplicate", False):
+            return PRIORITY_DUPLICATE
+        if getattr(frame, "eyes_closed", False):
+            return PRIORITY_BLINK
+        report = self.blur_reports.get(key)
+        if report is not None and getattr(report, "is_blurry", False):
+            return PRIORITY_BLURRY
+        return PRIORITY_REJECTED if rejected else PRIORITY_KEEPER
+
+    def sorted_keys(self, mode: str = SORT_CAPTURE, keys=None) -> list[str]:
+        """``keys`` (the working set by default) in the order ``mode`` asks.
+
+        Smart Priority is stable: within the top rank picks come first, then
+        5 stars down to 1; otherwise capture order is kept.
+        """
+        keys = self.keys() if keys is None else [str(k) for k in keys]
+        if mode != SORT_SMART_PRIORITY:
+            return keys
+        frames = self._frames_by_key()
+        order = {k: i for i, k in enumerate(keys)}
+
+        def rank(key: str):
+            level = self.priority(key, frames)
+            if level == PRIORITY_KEEPER_MARKED:
+                return (level, 0 if key in self.picks else 1, -self.ratings.get(key, 0), order[key])
+            return (level, 0, 0, order[key])
+
+        return sorted(keys, key=rank)
+
+    def sunk_count(self, keys=None) -> int:
+        """How many photos Smart Priority sinks below the divider."""
+        frames = self._frames_by_key()
+        return sum(1 for k in (self.keys() if keys is None else keys) if self.priority(k, frames) >= SINK_FROM)
 
     def has_edits(self, path: str | Path, version: int | None = None) -> bool:
         slot = (str(path), self._version(path, version))
@@ -561,4 +801,5 @@ class LibrarySession:
         if self.edit_folder is None:
             return
         self.save_recipes()
+        self.save_histories()
         self.save_state()

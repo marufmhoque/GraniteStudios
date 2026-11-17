@@ -65,7 +65,7 @@ workspaces. In summary:
 | Graphics | None | Vector text, shapes, watermarks; SVG and PDF ([FR-17](#fr-17-design-and-vector-graphics)) |
 | Versions | None | Virtual copies with style branches, added in 2.00 ([FR-19](#fr-19-versions-virtual-copies)) |
 | De-blur | Unsharp mask only | Deconvolution of motion and focus blur, added in 2.00 ([FR-20](#fr-20-de-blur-deconvolution)) |
-| Tests | None | **640** pytest tests ([7](#7-quality-and-verification)) |
+| Tests | None | **667** pytest tests ([7](#7-quality-and-verification)) |
 
 ---
 
@@ -422,6 +422,7 @@ Measurements in 1.0 §FR-5 still hold.
 | FR-6.5 | Remove Images | Shift+Delete or the toolbar: after one confirmation every rejected photo (manual, blur, blinks, duplicates, cull to target) leaves the working set, grid, filmstrips, counts and exports; files untouched; kept in the folder's session file and the project | **Done** — hash-checked in `test_invariants.py` |
 | FR-6.6 | Restore Removed Images | View menu: every removed photo listed with a tick; restored photos return in folder order with ratings, labels, versions and edits, still rejected | **Done** |
 | FR-6.4 | Filter the grid | Keepers, AI picks, duplicates, rejected, blurry, motion, out of focus; and by person | **Done** |
+| FR-6.7 | Smart Priority sort | *Sort* menu: 1 picks, rated and AI-starred (picks first, then 5 stars down to 1), 2 unrated keepers, 3 duplicates, 4 blinks, 5 blurry, 6 rejected for no other reason; a rejected photo never ranks as a keeper; stable within a rank; a full-width *Culled & Flagged for Removal (X items)* divider before rank 3; copies stay with their parent; arrow keys follow the order; *Capture Order* by default | **Done** (2.05) — `test_virtual_copies.py` |
 
 ### FR-7 Develop engine
 
@@ -440,6 +441,7 @@ Measurements in 1.0 §FR-5 still hold.
 | FR-7.11 | Geometry | Quarter turns, flips, straighten ±45°, vertical and horizontal keystone, crop by fractions; crop-to-clean or fill corners | **Done** |
 | FR-7.12 | Preview equals export | Large-radius effects built once on a 768 px copy and scaled, so a preview and a full export agree (mean difference < 2 levels, asserted) and exports render in 512-row strips with no seams (≤ 1 level, asserted) | **Done** |
 | FR-7.13 | Export formats | JPEG, PNG, TIFF (LZW), 16-bit TIFF, 16-bit PNG; size limit; DPI tag | **Done** |
+| FR-7.14 | Edit history | Every finished recipe change from any workspace is a step (time, label such as `Exposure +0.50` or `Auto-Level`, the whole recipe); Develop's History section lists them and clicking one restores it as a new step (undoable, nothing later lost); kept per photo version in `-edit/history/`, last 100 steps; a damaged file is an empty history | **Done** (2.05) — `test_audit_log.py` |
 
 **Module:** `engine/parametric_recipe.py`, `engine/develop_pipeline.py`.
 
@@ -578,11 +580,12 @@ original, as Lightroom's virtual copies do.
 | FR-19.1 | Lightweight copies (VRS-01) | Creating a version copies the active version's recipe into `<filename>.granite-v<N>.json`; no pixel data is duplicated; the original is untouched | **Done** |
 | FR-19.2 | Independent edits (VRS-02) | Each version is edited, saved and undone on its own; switching never writes one version's settings into another | **Done** |
 | FR-19.3 | Version bar (VRS-03) | Pills for Master, Copy 1, ... above the picture in Develop, Retouch and Design; click to switch; `+ Version`; rename and remove from the `⋯` menu or by right-clicking a pill | **Done** |
-| FR-19.4 | Grid badge (VRS-03) | A thumbnail with more than one version shows `v2/3` (active version / count), with every version named in its tooltip | **Done** |
+| FR-19.4 | Copies as tiles (VRS-03) | Each copy is its own tile right after its parent in the grid and filmstrips, chipped `v2`, `v3` (the parent `v1`; `DSC_0001_v2`); clicking a copy's tile edits it and selects it for export; right-click: Duplicate / Create Virtual Copy, Rename Copy, Delete Virtual Copy | **Done** (2.05; before, one tile with a `v2/3` badge) |
+| FR-19.10 | Ctrl+D | Duplicate the selected tiles (or the one shown) in Cull, the version being edited in Develop (Cmd+D on macOS); Ctrl+' still works in Cull | **Done** (2.05) |
 | FR-19.5 | Side-by-side compare (VRS-03) | **V** shows another version beside the one being edited, zoom and pan locked; **Shift+V** picks which; **[** / **]** switch the version being edited | **Done** |
 | FR-19.6 | Style versions in one action (VRS-04) | `+ 3 Styles` (or right-click / Versions menu in Cull, for a whole selection) branches Cinematic, Warm Analog and Clean B&W from the master, keeping its crop, lens, detail, layers and overlays | **Done** |
 | FR-19.7 | Naming (UX 2) | Copies are named `Copy 1`, `Copy 2`...; any name can be given (`Moody Edit`); names are unique per photograph; the title reads `IMG_1.CR2 (Copy 1)` | **Done** |
-| FR-19.8 | Export | Each version exports as its own file, `IMG_1_v2-moody-edit.jpg`; or only the active version, by unticking *Export every version* | **Done** |
+| FR-19.8 | Export | Each version exports as its own file, `IMG_1_v2-moody-edit.jpg` (numbered like the chips: copy 1 is v2); unticking *Export every version* exports the selected tiles, a selected copy on its own | **Done** — before 2.05 copy 1 was tagged `v1` |
 | FR-19.9 | Persistence | Names and the active version are kept in `session.granite.json`; copies are also found from their recipe files, so a lost session file loses only the names | **Done** |
 
 Ratings, colour labels, picks and rejection belong to the photograph and are
@@ -678,9 +681,12 @@ launch are replaced in tests.
 | FR-22.6 | Project Hub | At launch: New Project, Open Existing Project, a folder without a project, the recent list; **Always reopen last active project** skips it | **Done** |
 | FR-22.7 | File menu | New Project (Ctrl+N), Open Project (Ctrl+O), Save Project (Ctrl+S; offers to create one from the open folder), Recent Projects | **Done** |
 | FR-22.8 | One folder per project | `source_directories` is a list, but a project opens its first folder only | **Partial** — several folders per project is not built |
+| FR-22.9 | Audit log | `audit_log` in the project: time, stage, description for each batch operation (Smart Cull, cull to target, reject non-picks, blur triage, sharpening, auto-level, remove and restore, batch grade, sync, batch copies, export); saved with the project, at most 1,000 entries; logged before a project exists, adopted by a project made from that folder | **Done** (2.05) |
+| FR-22.10 | Workflow checklist and History drawer | `stage_status` plus the session: Ingest, Cull, Blur Triage, Auto-Level (Done / Not Started), Develop (In Progress X/Y keepers edited), Export (Done / Pending); the **📋 History** button slides out a drawer with the checklist and the timeline, newest first | **Done** (2.05) |
 
 **Module:** `engine/project_manager.py`, `ui/widgets/welcome_hub.py`,
-`ui/main_window.py`. **Verified:** `tests/test_project_manager.py`.
+`ui/main_window.py`, `ui/widgets/activity_log_drawer.py`. **Verified:** `tests/test_project_manager.py`,
+`tests/test_audit_log.py`.
 
 ---
 
@@ -896,7 +902,7 @@ verified whole and unpacked in memory, so no unverified file reaches disk.
 
 ### 7.1 Approach
 
-**640 pytest tests** (639 pass and 1 skips on the development machine, where
+**667 pytest tests** (666 pass and 1 skips on the development machine, where
 the hosted backend's own requirements are not installed). They exercise the
 real engines and the real window — headless, with `QT_QPA_PLATFORM=offscreen`
 — and mock nothing but file dialogs and, in two tests, the network.
@@ -917,6 +923,8 @@ repository, which may sit on a synced drive.
 | `test_parametric_recipe.py` | 53 | Round trips, tolerance of bad input, sidecars, INV-7, looks match 1.0 |
 | `test_vector_canvas.py` | 49 | Shapes, text layout and scaling, tokens, snapping, SVG and PDF dimensions, templates |
 | `test_project_manager.py` | 22 | Project create, save, reload, stable IDs, active images, reopening where work stopped, damaged files, recent list, File menu, hub, start-up |
+| `test_virtual_copies.py` | 14 | Virtual copies: media untouched and not duplicated, tiles beside the parent, chips and names, independent recipes, Ctrl+D in Cull and Develop, copy tile menu, export of a selected copy; Smart Priority order, ranks and divider |
+| `test_audit_log.py` | 13 | Audit log and stages, persistence, damaged logs, the checklist, the window's logging, adoption by a new project, the History drawer; edit history labels, storage, restore-to-step, copies, the Develop panel |
 | `test_purge.py` | 12 | Remove Images: files untouched, set and exports updated, restore with marks and edits, persistence, Cull button, shortcut, restore dialog, filmstrips |
 | `test_color_splash.py` | 11 | One-click layer, recipe round trip, object kept and rest grey at equal brightness, off / inverted / partial, the selection cached, model absent, luminance-preserving saturation, the Retouch tool, export |
 | `test_layer_stack.py` | 47 | Blend-mode values, masks, compositing, pixel layers, through the pipeline |
