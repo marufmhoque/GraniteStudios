@@ -65,7 +65,7 @@ workspaces. In summary:
 | Graphics | None | Vector text, shapes, watermarks; SVG and PDF ([FR-17](#fr-17-design-and-vector-graphics)) |
 | Versions | None | Virtual copies with style branches, added in 2.00 ([FR-19](#fr-19-versions-virtual-copies)) |
 | De-blur | Unsharp mask only | Deconvolution of motion and focus blur, added in 2.00 ([FR-20](#fr-20-de-blur-deconvolution)) |
-| Tests | None | **693** pytest tests ([7](#7-quality-and-verification)) |
+| Tests | None | **770** pytest tests ([7](#7-quality-and-verification)) |
 
 ---
 
@@ -416,7 +416,10 @@ Measurements in 1.0 §FR-5 still hold.
 
 | ID | Requirement | Acceptance criteria | Status |
 | --- | --- | --- | --- |
-| FR-6.1 | Select all / none / invert | Scoped to visible frames | **Done** |
+| FR-6.1 | Select all / none / invert | Scoped to visible frames; a **Select ▾** menu, Ctrl+A and Ctrl+D | **Done** (menu 2.08) |
+| FR-6.8 | Select misfires | `get_duplicate_images`, `get_blurry_images` (out of focus or motion), `get_blink_images`, `get_all_misfires` (those and the rejected, once each, in folder order, removed photos never); a photo picked or starred by hand is not a misfire unless rejected; the Select menu selects each group with its count, clearing a filter that would hide them, and scrolls to the first | **Done** (2.08) — `test_clean_up.py` |
+| FR-6.9 | Clean Up Shoot | `CleanUpAssistantDialog`: duplicates, blurry, blinks and rejects with counts and a tick each; *Total selected for removal* and *Keepers remaining*; **Inspect in Grid** selects them; **Remove Selected Photos** rejects and removes them from the project with a toast. There is no move-to-Trash option: removing never deletes or moves a file (INV-1) | **Done** (2.08) |
+| FR-6.10 | Rejected photos are locked | `is_editable` is false for rejected and removed photos; `set_recipe`, `touch`, `apply_recipe` and `sync_settings` skip them with a warning; Enter or a double-click does not open them in Develop; the filmstrips hide them and Left / Right skip them; Develop, Retouch and Design disable and dim their controls behind a *Marked for Removal — Editing Disabled* banner with **↺ Restore Photo**. Duplicates, blinks and blurry photos the AI only flagged are not locked | **Done** (2.08) — `test_edit_lock.py` |
 | FR-6.2 | Reject, restore, review before acting | | **Done** |
 | FR-6.3 | Rejection is never deletion | | **Done** (INV-1) |
 | FR-6.5 | Remove Images | Shift+Delete or the toolbar: after one confirmation every rejected photo (manual, blur, blinks, duplicates, cull to target) leaves the working set, grid, filmstrips, counts and exports; files untouched; kept in the folder's session file and the project | **Done** — hash-checked in `test_invariants.py` |
@@ -536,6 +539,7 @@ end. Every workspace was also rendered with real camera files and inspected.
 | FR-16.9 | Inpainting | Fast marching for holes under 24 px; LaMa for larger, in a context window, only the hole replaced | **Done** — LaMa output checked for colour (blue sky stays blue); visual quality on real prints unjudged |
 | FR-16.10 | A failing layer must not lose the picture | Skipped with a reason; the rest of the stack applies | **Done** |
 | FR-16.11 | Color Splash (Isolate Object) | Retouch tool: one click runs `Segmenter.segment_object_at_point` (EfficientSAM-Ti) and adds an adjustment layer of saturation −100 through the **inverted** click mask, feathered 1.5 px at full size; further clicks add to the object (up to six); hide, adjust or un-invert it at any time; stored in the recipe | **Done** — on a real photo one click kept a shirt in colour, three kept the whole player; 7.8 s first render at 1,644 px, ~1 s re-render after a slider change (the selection is cached) |
+| FR-16.13 | Color Splash Brush | Retouch tool: black and white everywhere, colour painted back through an 8-bit mask. `SmartBrushEngine.paint_stroke` works on the circle under the brush: reference colour from the 3×3 median in CIE-Lab, walls where the Lab gradient (Sobel) is steep, only pixels close in Delta E and connected to the centre are painted, grown 2 px into same-coloured edge pixels so no seam is left; sensitivity Low / Medium / High; snapping can be turned off; erase with Alt or the Erase button; Invert and Reset; size 10–300 px with `[` / `]`; a circle-and-crosshair cursor; only the changed rectangle is repainted. The mask is a PNG in the photo's assets folder, used by an adjustment layer (saturation −100 through the inverted raster mask), so export composites it like any layer | **Done** (2.08) — a red/blue edge holds at every sensitivity; a dab < 50 ms on a 1,500 px image (asserted); not tried on real photos by hand |
 | FR-16.12 | Click selections are computed once | A click mask is cached per set of points and size, so re-rendering a stack does not re-run the model | **Done** — before 2.04 every re-render ran EfficientSAM again (4.3 s at 1,600 px) |
 
 **Modules:** `engine/layer_stack.py`, `ai_tools/segmentation.py`,
@@ -562,13 +566,17 @@ tile on the CPU (one measurement).
 
 | ID | Requirement | Acceptance criteria | Status |
 | --- | --- | --- | --- |
-| FR-18.1 | Presets | Web JPEG 2048 px; full-size JPEG; 16-bit TIFF; print JPEG at 300 dpi; 16-bit PNG | **Done** |
+| FR-18.1 | Presets | Web JPEG 2048 px; full-size JPEG; 16-bit TIFF; print JPEG at 300 dpi; 16-bit PNG; Instagram 4:5 (exactly 1080 × 1350, padded with a blurred copy, nothing cropped) | **Done** (Instagram preset 2.08) |
 | FR-18.2 | Render everything | Recipe, layers (with the models and patch files they need), overlays, corner fill | **Done** |
 | FR-18.3 | Batch watermark | Any template, filled per frame | **Done** |
 | FR-18.4 | Unique names | Two sources sharing a stem (`IMG_1.CR2`, `IMG_1.JPG`) get their extension added | **Done** |
 | FR-18.5 | One bad frame does not stop a batch | Failures listed afterwards | **Done** |
+| FR-18.6 | Person query | `get_images_for_people(person_ids, match_mode)` over `people.granite.json`: `ANY` (at least one of them), `ALL` (all together), `SOLO` (one person alone; an unrecognised face counts as somebody else), `ALL_PROJECT` (every keeper); removed photos always, and rejected ones in the session, left out | **Done** (2.08) |
+| FR-18.7 | Export bundles | `ExportBundle`: name, people (none = everyone), match mode, preset, watermark, subfolder; kept in the edit folder (`export-queue.granite.json`) | **Done** (2.08) |
+| FR-18.8 | Run the queue | `MultiExportRunner.run_bundles`: each bundle into `<base>/<subfolder>`; a photo two bundles need with the same preset and watermark rendered once and copied; renders across cores within the safe RAM budget; progress as (bundle, file, total) with *Bundle 2 of 3 (Sam & Joe): photo 42 of 92*; a bundle aimed at the photo folder itself refused; one unreadable photo does not stop the rest | **Done** (2.08) |
+| FR-18.9 | Queue builder | Export workspace: a card per bundle (title from the people's names, people picker with face thumbnails and search, Everyone / Any of these / Together (All) / Solo portraits, preset, watermark, subfolder, live match count, ✕), **+ Add Export Bundle**, base folder, **🚀 Run All Exports (X total files across Y bundles)** and a progress bar | **Done** (2.08) |
 
-**Module:** `engine/export_presets.py`, `ui/workspaces/export.py`.
+**Module:** `engine/export_presets.py`, `ai_tools/person_clustering.py`, `ui/workspaces/export.py`, `ui/widgets/export_queue.py`.
 
 ### FR-19 Versions (virtual copies)
 
@@ -581,7 +589,7 @@ original, as Lightroom's virtual copies do.
 | FR-19.2 | Independent edits (VRS-02) | Each version is edited, saved and undone on its own; switching never writes one version's settings into another | **Done** |
 | FR-19.3 | Version bar (VRS-03) | Pills for Master, Copy 1, ... above the picture in Develop, Retouch and Design; click to switch; `+ Version`; rename and remove from the `⋯` menu or by right-clicking a pill | **Done** |
 | FR-19.4 | Copies as tiles (VRS-03) | Each copy is its own tile right after its parent in the grid and filmstrips, chipped `v2`, `v3` (the parent `v1`; `DSC_0001_v2`); clicking a copy's tile edits it and selects it for export; right-click: Duplicate / Create Virtual Copy, Rename Copy, Delete Virtual Copy | **Done** (2.05; before, one tile with a `v2/3` badge) |
-| FR-19.10 | Ctrl+D | Duplicate the selected tiles (or the one shown) in Cull, the version being edited in Develop (Cmd+D on macOS); Ctrl+' still works in Cull | **Done** (2.05) |
+| FR-19.10 | Ctrl+' | Duplicate the selected tiles (or the one shown) in Cull, the version being edited in Develop (Cmd+' on macOS). Ctrl+D did this in 2.05–2.07; since 2.08 it is Select None, as in Lightroom | **Done** |
 | FR-19.5 | Side-by-side compare (VRS-03) | **V** shows another version beside the one being edited, zoom and pan locked; **Shift+V** picks which; **[** / **]** switch the version being edited | **Done** |
 | FR-19.6 | Style versions in one action (VRS-04) | `+ 3 Styles` (or right-click / Versions menu in Cull, for a whole selection) branches Cinematic, Warm Analog and Clean B&W from the master, keeping its crop, lens, detail, layers and overlays | **Done** |
 | FR-19.7 | Naming (UX 2) | Copies are named `Copy 1`, `Copy 2`...; any name can be given (`Moody Edit`); names are unique per photograph; the title reads `IMG_1.CR2 (Copy 1)` | **Done** |
@@ -911,7 +919,7 @@ verified whole and unpacked in memory, so no unverified file reaches disk.
 
 ### 7.1 Approach
 
-**693 pytest tests** (692 pass and 1 skips on the development machine, where
+**770 pytest tests** (769 pass and 1 skips on the development machine, where
 the hosted backend's own requirements are not installed). They exercise the
 real engines and the real window — headless, with `QT_QPA_PLATFORM=offscreen`
 — and mock nothing but file dialogs and, in two tests, the network.
@@ -932,8 +940,12 @@ repository, which may sit on a synced drive.
 | `test_parametric_recipe.py` | 53 | Round trips, tolerance of bad input, sidecars, INV-7, looks match 1.0 |
 | `test_vector_canvas.py` | 49 | Shapes, text layout and scaling, tokens, snapping, SVG and PDF dimensions, templates |
 | `test_project_manager.py` | 22 | Project create, save, reload, stable IDs, active images, reopening where work stopped, damaged files, recent list, File menu, hub, start-up |
-| `test_virtual_copies.py` | 14 | Virtual copies: media untouched and not duplicated, tiles beside the parent, chips and names, independent recipes, Ctrl+D in Cull and Develop, copy tile menu, export of a selected copy; Smart Priority order, ranks and divider |
-| `test_project_settings.py` | 26 | Rename (file, name, recent list, bad names, case), moving the project file, relinking (every path, removed and selected photos, IDs, the edit folder renamed or copied, recipes and copies found again), missing folders, originals hashed untouched, the dialog applying everything or nothing, the window's locate prompt and Project Settings, the Hub's right-click menu |
+| `test_virtual_copies.py` | 14 | Virtual copies: media untouched and not duplicated, tiles beside the parent, chips and names, independent recipes, Ctrl+' in Cull and Develop (Ctrl+D is Select None), copy tile menu, export of a selected copy; Smart Priority order, ranks and divider |
+| `test_project_settings.py` | 28 | Rename (file, name, recent list, bad names, case), moving the project file, relinking (every path, removed and selected photos, IDs, the edit folder renamed or copied, recipes and copies found again), missing folders, originals hashed untouched, the dialog applying everything or nothing, the window's locate prompt and Project Settings, the Hub's right-click menu, Rename button and F2, File ▸ Check for Updates |
+| `test_clean_up.py` | 15 | Duplicates, blurry, blinks and rejects found once each, picks and stars kept, removed photos left out; the assistant's counts, unticking, removal (hash-checked, undoable, remembered), Inspect; the Select menu and Clean Up button |
+| `test_edit_lock.py` | 14 | `is_editable`; sync, apply and saving skip locked photos; earlier edits kept; restore; Enter refused with a toast; filmstrip and arrow keys skip rejects; Develop, Retouch and Design lock and Restore |
+| `test_smart_brush.py` | 17 | Edge containment, erase, sensitivity on a faint edge, snapping off, a brush on the edge, drags without gaps, speed, the preview; the mask saved and exported (colour only where painted, originals untouched); the Retouch tool, size keys, invert, reset, erase, the lock; partial repaint |
+| `test_multi_export.py` | 29 | Person query (ANY, ALL, SOLO, ALL_PROJECT, string ids, order, removed and rejected photos, the saved manifest), bundle names, folders, presets and saving, two bundles in their own folders, a shared photo rendered once, unreadable photos, the photo folder refused, Instagram 4:5 size, originals hashed untouched, the queue builder (counts, picker, run, reload) |
 | `test_audit_log.py` | 13 | Audit log and stages, persistence, damaged logs, the checklist, the window's logging, adoption by a new project, the History drawer; edit history labels, storage, restore-to-step, copies, the Develop panel |
 | `test_purge.py` | 12 | Remove Images: files untouched, set and exports updated, restore with marks and edits, persistence, Cull button, shortcut, restore dialog, filmstrips |
 | `test_color_splash.py` | 11 | One-click layer, recipe round trip, object kept and rest grey at equal brightness, off / inverted / partial, the selection cached, model absent, luminance-preserving saturation, the Retouch tool, export |

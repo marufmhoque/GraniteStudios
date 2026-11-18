@@ -661,11 +661,29 @@ class MainWindow(QMainWindow):
     def current_workspace(self):
         return self.workspaces[self._current_index]
 
-    def open_in_develop(self, path) -> None:
+    def open_in_develop(self, path) -> bool:
+        """Enter or a double-click: edit a photo in Develop. A rejected or
+        removed photo is locked, so it stays in the grid and a toast says
+        why. Returns True if Develop was opened."""
         if path is None:
-            return
+            return False
+        if not self.session.is_editable(path):
+            from src.ui.widgets.edit_lock import OPEN_REFUSED
+
+            self.show_toast(OPEN_REFUSED)
+            return False
         self.session.set_current(str(path))
         self.switch_to(self.develop)
+        return True
+
+    def show_toast(self, text: str) -> None:
+        """A short message over the bottom of the window (and in the status bar)."""
+        from src.ui.widgets.toast import Toast
+
+        if getattr(self, "toast", None) is None:
+            self.toast = Toast(self.centralWidget() or self)
+        self.toast.show_message(text)
+        self.status_label.setText(text)
 
     def thumbnail_for(self, key: str):
         """The grid's thumbnail for a frame, for the filmstrips."""

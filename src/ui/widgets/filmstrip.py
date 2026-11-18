@@ -1,10 +1,12 @@
 """A strip of the working set along the bottom of an editing workspace.
 
-Shows every frame in the folder in order, each followed by its virtual
-copies (with a small ``v2`` chip), dims the rejected ones, outlines the one
-being edited, and moves to a tile when it is clicked. It borrows the
+Shows the frames that can be edited, in order, each followed by its virtual
+copies (with a small ``v2`` chip), outlines the one being edited, and moves to a tile when it is clicked. It borrows the
 thumbnails the Cull grid has already decoded, so it costs nothing to keep up
 to date.
+
+Rejected photos are locked against editing, so by default they are left out
+(``hide_locked``); the photo being shown stays, so you can see where you are.
 """
 
 from __future__ import annotations
@@ -36,6 +38,7 @@ class Filmstrip(QScrollArea):
         self.setWidget(self._host)
         self._tiles: dict[str, QLabel] = {}          # tile id -> tile (a photo's key for its own)
         self._entries: dict[str, object] = {}
+        self.hide_locked = True                      # rejected photos are not offered for editing
         # Copies made or removed anywhere, and switching between them, show here.
         session.subscribe(lambda topic: self.refresh() if topic == "versions" else None)
 
@@ -44,6 +47,14 @@ class Filmstrip(QScrollArea):
         if self.session.version_count(entry.key) > 1:
             self.session.set_active_version(entry.key, entry.version)
 
+    def entries(self) -> list:
+        """The tiles to show: every entry, less the locked ones by default."""
+        entries = self.session.entries()
+        if not self.hide_locked:
+            return entries
+        current = self.session.current
+        return [e for e in entries if e.key == current or self.session.is_editable(e.key)]
+
     def rebuild(self) -> None:
         while self._row.count():
             item = self._row.takeAt(0)
@@ -51,7 +62,7 @@ class Filmstrip(QScrollArea):
                 item.widget().deleteLater()
         self._tiles.clear()
         self._entries.clear()
-        for entry in self.session.entries():
+        for entry in self.entries():
             tile = QLabel()
             tile.setFixedSize(QSize(STRIP_THUMB, STRIP_THUMB))
             tile.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -73,7 +84,7 @@ class Filmstrip(QScrollArea):
 
     def refresh(self) -> None:
         """Pick up newly decoded thumbnails, the marks and the copies."""
-        if set(self._tiles) != {e.tile_id for e in self.session.entries()}:
+        if set(self._tiles) != {e.tile_id for e in self.entries()}:
             self.rebuild()
             return
         current = self.session.current

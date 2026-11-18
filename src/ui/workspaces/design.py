@@ -30,6 +30,7 @@ from src.engine import session as topics
 from src.graphics import vector_canvas as vc
 from src.ui.widgets.canvas import ImageCanvas
 from src.ui.widgets.controls import Section, SliderRow
+from src.ui.widgets.edit_lock import EditLockBanner, apply_lock
 from src.ui.widgets.filmstrip import Filmstrip
 from src.ui.widgets.renderer import LatestOnlyRenderer
 from src.ui.widgets.versions import VersionBar
@@ -125,6 +126,7 @@ class DesignWorkspace(Workspace):
         left_host.setLayout(left)
         left_host.setFixedWidth(200)
         outer.addWidget(left_host)
+        self.left_host = left_host
 
         centre = QVBoxLayout()
         centre.setContentsMargins(6, 10, 6, 8)
@@ -146,6 +148,9 @@ class DesignWorkspace(Workspace):
         bar.addWidget(self._button("Export PDF…", self._on_export_pdf, "The photo with the design, as a PDF page"))
         centre.addLayout(bar)
         centre.addWidget(self.version_bar)
+        self.lock_banner = EditLockBanner()
+        self.lock_banner.restore_requested.connect(self.restore_photo)
+        centre.addWidget(self.lock_banner)
         self.canvas = ImageCanvas()
         self.canvas.pan_with_left_button = False
         self.canvas.set_overlay(self._paint_overlay)
@@ -212,6 +217,27 @@ class DesignWorkspace(Workspace):
         panel.addStretch()
         scroll.setWidget(host)
         outer.addWidget(scroll)
+        self.controls_container = scroll
+
+    # -- the edit lock --------------------------------------------------------- #
+
+    @property
+    def locked(self) -> bool:
+        return self.key is not None and not self.session.is_editable(self.key)
+
+    def update_edit_lock_state(self) -> bool:
+        """Disable editing, and show the banner, while the photo is rejected
+        or removed. Returns True when it may be edited."""
+        return apply_lock(self.session, self.key, self.lock_banner,
+                          [self.left_host, self.controls_container, self.version_bar])
+
+    def restore_photo(self) -> None:
+        """↺ Restore Photo: no longer rejected, back in the project; editable."""
+        if self.key is None:
+            return
+        self.session.restore_photo(self.key)
+        self.update_edit_lock_state()
+        self.status_label.setText(f"Restored {Path(self.key).name}: it can be edited again.")
 
     def _button(self, text, slot, tip="") -> QPushButton:
         button = QPushButton(text)
@@ -238,6 +264,7 @@ class DesignWorkspace(Workspace):
             self.switch_version()
         else:
             self._render_base()
+        self.update_edit_lock_state()
         self.setFocus()
 
     def switch_version(self) -> None:
@@ -262,10 +289,12 @@ class DesignWorkspace(Workspace):
             self.key, self.source = None, None
             self.canvas.set_image(None)
             self.filmstrip.rebuild()
-        elif topic in (topics.CURRENT, topics.MARKS):
+        elif topic in (topics.CURRENT, topics.MARKS, topics.PURGED):
             self.filmstrip.refresh()
             if topic == topics.CURRENT and self.shell.__dict__.get("_current_index") is not None and self.shell.current_workspace is self and self.session.current != self.key:
                 self.load(self.session.current)
+            elif topic != topics.CURRENT:
+                self.update_edit_lock_state()
         elif topic == topics.VERSIONS and self.key is not None:
             shown = self.shell.__dict__.get("_current_index") is not None and self.shell.current_workspace is self
             if shown and self.session.active_version(self.key) != self.version:
@@ -277,6 +306,7 @@ class DesignWorkspace(Workspace):
         self._commit()
         self.version_bar.set_photo(key)
         self.key = key
+        self.update_edit_lock_state()
         if key is None:
             self.items, self.source = [], None
             self.canvas.set_image(None)
@@ -319,7 +349,7 @@ class DesignWorkspace(Workspace):
         return self.metadata.get(self.key) if self.key else None
 
     def _commit(self) -> None:
-        if self.key is None:
+        if self.key is None or self.locked:
             return
         recipe = self.session.recipe(self.key, self.version)
         stored = [vc.item_to_dict(item) for item in self.items]
@@ -458,7 +488,7 @@ class DesignWorkspace(Workspace):
         return float(self.grid_size.currentText().rstrip("%")) / 100.0
 
     def _on_press(self, x: float, y: float, button) -> None:
-        if button != Qt.MouseButton.LeftButton:
+        if button != Qt.MouseButton.LeftButton or self.locked:
             return
         self.setFocus()
         index = self._hit(x, y)
@@ -495,6 +525,8 @@ class DesignWorkspace(Workspace):
             self.canvas.update()
 
     def keyPressEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        if self.locked:                       # nothing is nudged or deleted on a locked photo
+            return super().keyPressEvent(event)
         item = self._current()
         moves = {Qt.Key.Key_Left: (-NUDGE, 0), Qt.Key.Key_Right: (NUDGE, 0),
                  Qt.Key.Key_Up: (0, -NUDGE), Qt.Key.Key_Down: (0, NUDGE)}

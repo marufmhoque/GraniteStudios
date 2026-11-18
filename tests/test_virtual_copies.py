@@ -3,7 +3,7 @@
 VC-01  a virtual copy duplicates the edit recipe only: no image data on disk
 VC-02  each copy is its own tile, right after its parent, chipped v2, v3
 VC-03  copies are edited and exported independently
-VC-04  Ctrl+D duplicates in Cull and Develop; right-click offers it on every tile
+VC-04  Ctrl+' duplicates in Cull and Develop; right-click offers it on every tile
 SP-01  Smart Priority puts the keepers first and sinks the culled and rejected
 SP-02  a divider marks where the culled and flagged photos begin
 """
@@ -187,11 +187,23 @@ def test_copies_appear_as_tiles_right_after_their_parent(harness):
     assert made[0].tile_id in w.develop.filmstrip._tiles
 
 
-def test_ctrl_d_is_the_duplicate_shortcut_in_cull_and_develop(harness):
+def test_ctrl_apostrophe_is_the_duplicate_shortcut_in_cull_and_develop(harness):
+    """Ctrl+' makes a virtual copy (as in Lightroom); since 2.08 Ctrl+D is
+    Select None in Cull."""
     w = harness.window
     for workspace in (w.cull, w.develop):
-        keys = {s.key().toString() for s in workspace.findChildren(QShortcut)}
-        assert "Ctrl+D" in keys, workspace.title
+        shortcuts = {s.key().toString(): s for s in workspace.findChildren(QShortcut)}
+        assert "Ctrl+'" in shortcuts, workspace.title
+    cull_keys = {s.key().toString() for s in w.cull.findChildren(QShortcut)}
+    assert {"Ctrl+A", "Ctrl+D"} <= cull_keys
+    before = len(w.session.entries())
+    w.session.set_current(w.session.keys()[0])
+    w.selected = set()
+    {s.key().toString(): s for s in w.cull.findChildren(QShortcut)}["Ctrl+'"].activated.emit()
+    assert len(w.session.entries()) == before + 1
+    w.selected = set(w.session.keys())
+    {s.key().toString(): s for s in w.cull.findChildren(QShortcut)}["Ctrl+D"].activated.emit()
+    assert not w.selected
     labels = [a.text() for a in w.cull.version_menu(w.session.keys()[0]).actions()]
     assert "Duplicate / Create Virtual Copy" in labels
 

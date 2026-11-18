@@ -82,6 +82,10 @@ class ExportWorkspace(Workspace):
         column = QVBoxLayout(host)
         column.setContentsMargins(0, 0, 0, 0)
         column.addWidget(self._build_files_section())
+        from src.ui.widgets.export_queue import ExportQueuePanel
+
+        self.queue = ExportQueuePanel(self)
+        column.addWidget(self.queue)
         column.addWidget(self._build_reel_page())
         column.addWidget(self._build_web_page())
         column.addStretch()
@@ -90,9 +94,22 @@ class ExportWorkspace(Workspace):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(scroll)
         self.color_status = self.status_label
+        self.session.subscribe(self.on_session)
 
     def on_enter(self) -> None:
         self._refresh_counts()
+        self.queue.load_for_folder()
+
+    def on_session(self, topic: str) -> None:
+        from src.engine import session as sess
+
+        if topic == sess.LIBRARY:
+            self.queue.load_for_folder()
+        elif topic in (sess.MARKS, sess.PURGED):
+            self.queue.refresh_counts()
+
+    def shutdown(self) -> None:
+        self.queue.save()
 
     def _selected_paths(self) -> list[Path]:
         """Photos with any tile selected in Cull: their own, or a virtual copy's."""

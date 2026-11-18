@@ -8,8 +8,14 @@ Keyboard, with the grid focused:
     U           clear pick and reject           Enter   open in Develop
     S           survey the selection side by side
     F           face loupe for the selection
-    Ctrl+D      duplicate: a virtual copy of each selected tile (Ctrl+' too)
+    Ctrl+A      select all                      Ctrl+D  select none
+    Ctrl+'      duplicate: a virtual copy of each selected tile
     Shift+Del   remove the rejected photos from the project
+
+The Select menu also picks out every duplicate, blurry photo, blink, or all
+the misfires and rejects at once, and **Clean Up Misfires…** reviews them
+and removes them from the project in one step (the files are not touched).
+A rejected photo does not open in Develop: it is locked until restored.
 
 Virtual copies are tiles of their own, right after their parent, with a
 ``v2``, ``v3`` chip. Right-click any tile to duplicate it, or to rename or
@@ -222,7 +228,7 @@ class CullWorkspace(Workspace):
         elif key == Qt.Key.Key_F:
             self._on_face_loupe()
         elif key == Qt.Key.Key_Apostrophe and event.modifiers() & Qt.KeyboardModifier.ControlModifier:
-            self.create_virtual_copies()
+            self.create_virtual_copies()              # the Ctrl+' shortcut, when it is not caught first
         elif key == Qt.Key.Key_Escape and self.view_stack.currentIndex():
             self.view_stack.setCurrentIndex(0)
         else:
@@ -416,16 +422,15 @@ class CullWorkspace(Workspace):
         # --- Row 1: selection and rejection ------------------------------ #
         sel_row = QHBoxLayout()
         sel_row.setSpacing(8)
-        sel_row.addWidget(QLabel("Select:"))
-        for text, slot in (
-            ("All", self._on_select_all),
-            ("None", self._on_select_none),
-            ("Invert", self._on_select_invert),
-        ):
-            btn = QPushButton(text)
-            btn.setObjectName("SecondaryButton")
-            btn.clicked.connect(slot)
-            sel_row.addWidget(btn)
+        self.select_button = QPushButton("Select \u25be")
+        self.select_button.setObjectName("SecondaryButton")
+        self.select_button.setToolTip("Select all, none, the inverse, or every duplicate, blurry photo, "
+                                      "blink or misfire")
+        self.select_menu = QMenu(self.select_button)
+        self.select_menu.aboutToShow.connect(self._fill_select_menu)
+        self.select_button.setMenu(self.select_menu)
+        sel_row.addWidget(self.select_button)
+        self._fill_select_menu()
 
         sel_row.addSpacing(18)
 
@@ -460,12 +465,21 @@ class CullWorkspace(Workspace):
         )
         self.remove_button.clicked.connect(self.remove_images)
         sel_row.addWidget(self.remove_button)
+        self.clean_up_button = QPushButton("\U0001F9F9 Clean Up Misfires\u2026")
+        self.clean_up_button.setObjectName("ActionButton")
+        self.clean_up_button.setToolTip(
+            "Review the duplicates, blurry photos, blinks and rejects together and remove them from the "
+            "project in one step. The files stay on disk, untouched.")
+        self.clean_up_button.clicked.connect(self.clean_up)
+        sel_row.addWidget(self.clean_up_button)
         for keys in ("Shift+Delete", "Shift+Backspace"):
             QShortcut(QKeySequence(keys), self, activated=self.remove_images,
                       context=Qt.ShortcutContext.WidgetWithChildrenShortcut)
-        # Ctrl+D is Cmd+D on macOS: Qt maps it.
-        QShortcut(QKeySequence("Ctrl+D"), self, activated=self.create_virtual_copies,
-                  context=Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        # Qt maps Ctrl to Cmd on macOS.
+        for keys, slot in (("Ctrl+A", self._on_select_all), ("Ctrl+D", self._on_select_none),
+                           ("Ctrl+'", self.create_virtual_copies)):
+            QShortcut(QKeySequence(keys), self, activated=slot,
+                      context=Qt.ShortcutContext.WidgetWithChildrenShortcut)
 
         sel_row.addStretch()
 
@@ -760,7 +774,7 @@ class CullWorkspace(Workspace):
             "Virtual copies: extra edits of the same photo that share its pixels. "
             "Applies to the selection, or the current frame.")
         versions_menu = QMenu(self.versions_button)
-        versions_menu.addAction("Duplicate / Create Virtual Copy  (Ctrl+D)", self.create_virtual_copies)
+        versions_menu.addAction("Duplicate / Create Virtual Copy  (Ctrl+')", self.create_virtual_copies)
         versions_menu.addAction("Create 3 Style Versions (" + ", ".join(pr.VERSION_STYLES).replace("&", "&&") + ")",
                                 lambda: self.create_style_versions(self._mark_targets()))
         self.versions_button.setMenu(versions_menu)
@@ -1283,6 +1297,71 @@ class CullWorkspace(Workspace):
         self.selected = {str(p) for p in self._visible_paths()}
         self.session.selected_copies = self._visible_copies()
         self._sync_selection_ui()
+
+    # -- the Select menu ------------------------------------------------------------ #
+
+    def _fill_select_menu(self) -> None:
+        """The menu, with today's counts."""
+        menu = self.select_menu
+        menu.clear()
+        menu.addAction("Select All\tCtrl+A", self._on_select_all)
+        menu.addAction("Select None\tCtrl+D", self._on_select_none)
+        menu.addAction("Invert Selection", self._on_select_invert)
+        menu.addSeparator()
+        session = self.session
+        for text, finder, noun in (
+            ("Select All Duplicates", session.get_duplicate_images, "duplicates"),
+            ("Select All Blurry", session.get_blurry_images, "blurry photos"),
+            ("Select All Blinks", session.get_blink_images, "blinks"),
+            ("\U0001F3AF Select All Misfires && Rejects", session.get_all_misfires, "misfires and rejects"),
+        ):
+            paths = finder() if session.is_open else []
+            action = menu.addAction(f"{text} ({len(paths):,})")
+            action.setEnabled(bool(paths))
+            action.triggered.connect(lambda _c=False, f=finder, n=noun: self.select_group(f(), n))
+
+    def select_group(self, paths, noun: str = "photos") -> int:
+        """Select exactly ``paths`` in the grid and scroll to the first.
+        If the Show filter would hide some of them, it goes back to All."""
+        keys = [str(p) for p in paths if str(p) in self.cells]
+        if any(not self._passes_view_filter(k) for k in keys):
+            self.view_filter.setCurrentText("All")
+            self.person_filter.setCurrentIndex(0)
+        self.selected = set(keys)
+        self.session.selected_copies = set()
+        self._sync_selection_ui()
+        if keys:
+            first = next(k for k in self.display_order() if k in self.selected)
+            self.session.set_current(first)
+            self.grid_scroll.ensureWidgetVisible(self.cells[first], 20, 20)
+        self.status_label.setText(f"Selected {len(keys):,} {noun}." if keys else f"No {noun} to select.")
+        return len(keys)
+
+    # -- Clean Up Shoot ---------------------------------------------------------------- #
+
+    def clean_up(self):
+        """🧹 Clean Up Misfires…: review the misfires, then inspect or remove them."""
+        from src.ui.dialogs.clean_up_dialog import INSPECT, REMOVE, CleanUpAssistantDialog
+
+        if not self.session.is_open:
+            self.status_label.setText("Load a folder first.")
+            return None
+        dialog = CleanUpAssistantDialog(self.session, self)
+        dialog.exec()
+        if dialog.action == INSPECT:
+            self.select_group(dialog.chosen(), "misfires")
+        elif dialog.action == REMOVE and dialog.removed:
+            removed = dialog.removed
+            self.shell_log("cull", f"Clean Up: removed {removed:,} misfire{'s' if removed != 1 else ''} "
+                                   "from the project")
+            message = f"Removed {removed:,} misfire{'s' if removed != 1 else ''}. " \
+                      f"Showing {self.session.total_images:,} keepers."
+            toast = getattr(type(self.shell), "show_toast", None)
+            if toast is not None:
+                toast(self.shell, message)
+            else:
+                self.status_label.setText(message)
+        return dialog
 
     def _on_select_none(self) -> None:
         self.selected.clear()

@@ -23,6 +23,35 @@ IG_FORMATS = {
 }
 
 
+def pad_to_canvas(image: Image.Image, size: tuple[int, int], blur_radius: int = 40) -> Image.Image:
+    """``image`` fitted whole inside a ``size`` canvas, the letterbox filled
+    with a blurred, darkened copy of itself (nothing is cropped)."""
+    canvas_w, canvas_h = size
+    image = image.convert("RGB")
+
+    # --- Background: cover-fit, blurred, darkened ------------------- #
+    bg_scale = max(canvas_w / image.width, canvas_h / image.height)
+    bg = image.resize(
+        (max(canvas_w, int(round(image.width * bg_scale))), max(canvas_h, int(round(image.height * bg_scale)))),
+        Image.Resampling.LANCZOS,
+    )
+    left = (bg.width - canvas_w) // 2
+    top = (bg.height - canvas_h) // 2
+    bg = bg.crop((left, top, left + canvas_w, top + canvas_h))
+    bg = bg.filter(ImageFilter.GaussianBlur(blur_radius))
+    bg = ImageEnhance.Brightness(bg).enhance(0.6)
+
+    # --- Foreground: contain-fit, centered -------------------------- #
+    fg_scale = min(canvas_w / image.width, canvas_h / image.height)
+    fg = image.resize(
+        (max(1, int(round(image.width * fg_scale))), max(1, int(round(image.height * fg_scale)))),
+        Image.Resampling.LANCZOS,
+    )
+    offset = ((canvas_w - fg.width) // 2, (canvas_h - fg.height) // 2)
+    bg.paste(fg, offset)
+    return bg
+
+
 class IgFormatter:
     """Pad images with a blurred background to exact Instagram ratios."""
 
@@ -50,30 +79,7 @@ class IgFormatter:
         if image is None:
             raise IOError(f"Could not load image: {image_path}")
 
-        canvas_w, canvas_h = IG_FORMATS[target]
-
-        # --- Background: cover-fit, blurred, darkened ------------------- #
-        bg_scale = max(canvas_w / image.width, canvas_h / image.height)
-        bg = image.resize(
-            (int(round(image.width * bg_scale)), int(round(image.height * bg_scale))),
-            Image.Resampling.LANCZOS,
-        )
-        left = (bg.width - canvas_w) // 2
-        top = (bg.height - canvas_h) // 2
-        bg = bg.crop((left, top, left + canvas_w, top + canvas_h))
-        bg = bg.filter(ImageFilter.GaussianBlur(self.blur_radius))
-        bg = ImageEnhance.Brightness(bg).enhance(0.6)
-
-        # --- Foreground: contain-fit, centered -------------------------- #
-        fg_scale = min(canvas_w / image.width, canvas_h / image.height)
-        fg = image.resize(
-            (int(round(image.width * fg_scale)), int(round(image.height * fg_scale))),
-            Image.Resampling.LANCZOS,
-        )
-        offset = ((canvas_w - fg.width) // 2, (canvas_h - fg.height) // 2)
-        bg.paste(fg, offset)
-
-        return bg
+        return pad_to_canvas(image, IG_FORMATS[target], self.blur_radius)
 
     def export(
         self,

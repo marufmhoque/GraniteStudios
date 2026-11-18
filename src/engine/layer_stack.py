@@ -231,6 +231,63 @@ def is_color_splash(layer: Layer | None) -> bool:
     return layer is not None and layer.kind == "adjustment" and layer.params.get("tool") == SPLASH_TOOL
 
 
+# The Color Splash *Brush*: the same black-and-white layer, but its mask is
+# painted by hand (edge-aware, see ai_tools/smart_brush.py) and kept as an
+# 8-bit PNG in the photo's assets folder: 255 where colour is revealed.
+SPLASH_BRUSH_TOOL = "color_splash_brush"
+SPLASH_BRUSH_NAME = "Color Splash Brush"
+
+
+def splash_brush_asset(version: int = 0) -> str:
+    """The mask file of a version's Color Splash Brush."""
+    return "color-splash-brush.png" if not version else f"color-splash-brush-v{int(version)}.png"
+
+
+def color_splash_brush_layer(asset: str) -> Layer:
+    """Black and white everywhere except where the painted mask reveals
+    colour: saturation -100 through the *inverted* raster mask."""
+    return Layer(
+        kind="adjustment",
+        name=SPLASH_BRUSH_NAME,
+        recipe={"basic": {"saturation": SPLASH_SATURATION}},
+        mask=Mask(kind="raster", params={"asset": Path(asset).name}, invert=True),
+        params={"tool": SPLASH_BRUSH_TOOL},
+    )
+
+
+def is_splash_brush(layer: Layer | None) -> bool:
+    return layer is not None and layer.kind == "adjustment" and layer.params.get("tool") == SPLASH_BRUSH_TOOL
+
+
+def save_mask_asset(source: str | Path, edit_folder: str | Path, name: str, mask: np.ndarray) -> str:
+    """Store an 8-bit painted mask; returns the name to put in the layer."""
+    folder = assets_folder(source, edit_folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    filename = Path(name).with_suffix(".png").name
+    ok, data = cv2.imencode(".png", np.ascontiguousarray(mask.astype(np.uint8)))
+    if not ok:
+        raise IOError("could not encode the mask")
+    temporary = folder / (filename + ".tmp")
+    temporary.write_bytes(data.tobytes())
+    temporary.replace(folder / filename)
+    return filename
+
+
+def load_mask_asset(source: str | Path, edit_folder: str | Path, name: str,
+                    size: tuple[int, int] | None = None) -> np.ndarray | None:
+    """A painted mask (uint8), resized to ``size`` (width, height) if given;
+    None if there is none."""
+    target = assets_folder(source, edit_folder) / Path(name).name
+    if not name or not target.exists():
+        return None
+    mask = cv2.imdecode(np.fromfile(str(target), np.uint8), cv2.IMREAD_GRAYSCALE)
+    if mask is None:
+        return None
+    if size is not None and (mask.shape[1], mask.shape[0]) != tuple(size):
+        mask = cv2.resize(mask, tuple(size), interpolation=cv2.INTER_LINEAR)
+    return mask
+
+
 def layers_from_recipe(recipe) -> list[Layer]:
     """The usable layers of a recipe, bottom first."""
     found = (layer_from_dict(item) for item in getattr(recipe, "layers", []) or [])

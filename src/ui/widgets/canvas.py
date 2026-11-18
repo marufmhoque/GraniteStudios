@@ -6,6 +6,11 @@ locked together for side-by-side comparison.
 
 Positions are exchanged as fractions of the image (0..1 across and down),
 never widget pixels, so a click means the same place whatever the zoom.
+
+In :data:`CANVAS_MODE_COLOR_SPLASH_BRUSH` the system cursor is replaced by
+a circle the size of the brush with a crosshair at its centre (red, with a
+minus, while Alt erases), and :meth:`ImageCanvas.update_region` repaints just
+the part of the picture a dab changed, so painting keeps up with the mouse.
 """
 
 from __future__ import annotations
@@ -13,9 +18,11 @@ from __future__ import annotations
 import numpy as np
 from PyQt6.QtCore import QPointF, QRectF, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QImage, QPainter, QPen
-from PyQt6.QtWidgets import QWidget
+from PyQt6.QtWidgets import QApplication, QWidget
 
 MIN_ZOOM, MAX_ZOOM = 0.02, 16.0
+CANVAS_MODE_NORMAL = "normal"
+CANVAS_MODE_COLOR_SPLASH_BRUSH = "color_splash_brush"
 
 
 def to_qimage(rgb: np.ndarray) -> QImage:
@@ -54,6 +61,81 @@ class ImageCanvas(QWidget):
         self._silent = False
         self.pan_with_left_button = True
         self.caption = ""
+        self.mode = CANVAS_MODE_NORMAL
+        self.brush_radius = 40.0        # image pixels, for the brush cursor
+        self.brush_erase = False        # erase mode chosen (Alt erases too)
+        self._mouse: QPointF | None = None
+
+    # -- the brush mode ------------------------------------------------------ #
+
+    def set_mode(self, mode: str) -> None:
+        """Normal, or the Color Splash brush (its own cursor)."""
+        self.mode = mode
+        if mode == CANVAS_MODE_COLOR_SPLASH_BRUSH:
+            self.setCursor(Qt.CursorShape.BlankCursor)
+        else:
+            self.unsetCursor()
+        self.update()
+
+    def set_brush(self, radius: float | None = None, erase: bool | None = None) -> None:
+        if radius is not None:
+            self.brush_radius = float(radius)
+        if erase is not None:
+            self.brush_erase = bool(erase)
+        self.update()
+
+    def erasing(self) -> bool:
+        return self.brush_erase or bool(QApplication.keyboardModifiers() & Qt.KeyboardModifier.AltModifier)
+
+    def update_region(self, patch: np.ndarray, x: int, y: int) -> None:
+        """Put an RGB patch into the picture at image pixel ``(x, y)`` and
+        repaint only that part of the screen."""
+        if self._image is None or patch.size == 0:
+            return
+        painter = QPainter(self._image)
+        painter.drawImage(int(x), int(y), to_qimage(patch))
+        painter.end()
+        rect = self.image_rect()
+        zoom = rect.width() / max(self._image.width(), 1)
+        dirty = QRectF(rect.x() + x * zoom, rect.y() + y * zoom, patch.shape[1] * zoom, patch.shape[0] * zoom)
+        self.update(dirty.adjusted(-2, -2, 2, 2).toAlignedRect())
+
+    def _paint_brush_cursor(self, painter: QPainter) -> None:
+        if self._mouse is None or self._image is None:
+            return
+        rect = self.image_rect()
+        radius = self.brush_radius * rect.width() / max(self._image.width(), 1)
+        erase = self.erasing()
+        colour = QColor("#ff5a5f") if erase else QColor("#ffffff")
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(QPen(QColor(0, 0, 0, 160), 3))
+        painter.drawEllipse(self._mouse, radius, radius)
+        painter.setPen(QPen(colour, 1.5))
+        painter.drawEllipse(self._mouse, radius, radius)
+        cross = 6.0
+        painter.drawLine(self._mouse + QPointF(-cross, 0), self._mouse + QPointF(cross, 0))
+        if not erase:
+            painter.drawLine(self._mouse + QPointF(0, -cross), self._mouse + QPointF(0, cross))
+        else:
+            painter.drawText(self._mouse + QPointF(radius * 0.7 + 4, -radius * 0.7 - 4), "\u2212")
+        painter.restore()
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        self._mouse = None
+        if self.mode == CANVAS_MODE_COLOR_SPLASH_BRUSH:
+            self.update()
+        super().leaveEvent(event)
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        if event.key() == Qt.Key.Key_Alt and self.mode == CANVAS_MODE_COLOR_SPLASH_BRUSH:
+            self.update()
+        super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event) -> None:  # noqa: N802
+        if event.key() == Qt.Key.Key_Alt and self.mode == CANVAS_MODE_COLOR_SPLASH_BRUSH:
+            self.update()
+        super().keyReleaseEvent(event)
 
     # -- content ----------------------------------------------------------- #
 
@@ -193,6 +275,9 @@ class ImageCanvas(QWidget):
             painter.setPen(QColor("#d0d0d4"))
             painter.drawText(QPointF(10, self.height() - 10), self.caption)
 
+        if self.mode == CANVAS_MODE_COLOR_SPLASH_BRUSH:
+            self._paint_brush_cursor(painter)
+
     # -- input ---------------------------------------------------------------- #
 
     def wheelEvent(self, event) -> None:  # noqa: N802
@@ -229,6 +314,12 @@ class ImageCanvas(QWidget):
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
         if self._image is None:
             return
+        if self.mode == CANVAS_MODE_COLOR_SPLASH_BRUSH:
+            old, self._mouse = self._mouse, event.position()
+            reach = self.brush_radius * self.zoom + 12
+            for point in (old, self._mouse):
+                if point is not None:
+                    self.update(QRectF(point.x() - reach, point.y() - reach, 2 * reach, 2 * reach).toAlignedRect())
         if self._drawing == "split":
             rect = self.image_rect()
             self._split = min(1.0, max(0.0, (event.position().x() - rect.x()) / max(rect.width(), 1.0)))

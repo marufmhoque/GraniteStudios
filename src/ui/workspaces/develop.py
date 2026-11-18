@@ -8,7 +8,10 @@ Keyboard, with the picture focused:
     0              fit to window               1          100 percent
     [ / ]          previous / next version     V          compare versions side by side
     Shift+V        compare with a different version
-    Ctrl+D         duplicate: a new virtual copy of the version being edited
+    Ctrl+'         duplicate: a new virtual copy of the version being edited
+
+A rejected or removed photo is locked: the controls are disabled and a
+banner offers to restore it (see ``src/ui/widgets/edit_lock.py``).
 
 Every control edits the frame's recipe. The preview is rendered on a
 background thread from a proxy of the frame, with the same pipeline the
@@ -47,6 +50,7 @@ from src.engine import parametric_recipe as pr
 from src.engine import session as topics
 from src.ui.widgets.canvas import ImageCanvas, link_views
 from src.ui.widgets.controls import CurveEditor, Histogram, Section, SliderRow, clipping_overlay
+from src.ui.widgets.edit_lock import EditLockBanner, apply_lock
 from src.ui.widgets.filmstrip import Filmstrip
 from src.ui.widgets.renderer import LatestOnlyRenderer
 from src.ui.widgets.versions import VersionBar
@@ -115,8 +119,8 @@ class DevelopWorkspace(Workspace):
         self.loader_job.ready.connect(self._on_source_loaded)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._build()
-        # Ctrl+D is Cmd+D on macOS: Qt maps it.
-        QShortcut(QKeySequence("Ctrl+D"), self, activated=self.duplicate,
+        # Ctrl+' is Cmd+' on macOS: Qt maps it. (Ctrl+D is Select None, in Cull.)
+        QShortcut(QKeySequence("Ctrl+'"), self, activated=self.duplicate,
                   context=Qt.ShortcutContext.WidgetWithChildrenShortcut)
         self.session.subscribe(self.on_session)
 
@@ -152,6 +156,9 @@ class DevelopWorkspace(Workspace):
         centre.addLayout(bar)
         self.version_bar = VersionBar(self.session, self._commit)
         centre.addWidget(self.version_bar)
+        self.lock_banner = EditLockBanner()
+        self.lock_banner.restore_requested.connect(self.restore_photo)
+        centre.addWidget(self.lock_banner)
         views = QHBoxLayout()
         views.setSpacing(8)
         self.canvas = ImageCanvas()
@@ -182,6 +189,7 @@ class DevelopWorkspace(Workspace):
         self.panel.setSpacing(6)
         panel_scroll.setWidget(panel)
         outer.addWidget(panel_scroll)
+        self.controls_container = panel_scroll       # everything that edits; disabled while locked
 
         self.histogram = Histogram()
         self.panel.addWidget(self.histogram)
@@ -392,7 +400,28 @@ class DevelopWorkspace(Workspace):
             self.load(self.session.current)
         else:
             self._refresh_history()
+            self.update_edit_lock_state()
         self.setFocus()
+
+    # -- the edit lock --------------------------------------------------------- #
+
+    @property
+    def locked(self) -> bool:
+        return self.key is not None and not self.session.is_editable(self.key)
+
+    def update_edit_lock_state(self) -> bool:
+        """Disable editing, and show the banner, while the photo is rejected
+        or removed. Returns True when it may be edited."""
+        return apply_lock(self.session, self.key, self.lock_banner, [self.controls_container, self.version_bar])
+
+    def restore_photo(self) -> None:
+        """↺ Restore Photo: no longer rejected, back in the project; editable."""
+        if self.key is None:
+            return
+        self.session.restore_photo(self.key)
+        self.update_edit_lock_state()
+        self._show_names()
+        self.status_label.setText(f"Restored {Path(self.key).name}: it can be edited again.")
 
     def on_leave(self) -> None:
         self.session.save_recipes()
@@ -406,10 +435,13 @@ class DevelopWorkspace(Workspace):
         elif topic == topics.RECIPE:
             if self._is_shown():             # a batch elsewhere is caught up on entering
                 self._refresh_history()
-        elif topic in (topics.CURRENT, topics.MARKS):
+        elif topic in (topics.CURRENT, topics.MARKS, topics.PURGED):
             self.filmstrip.refresh()
             if topic == topics.CURRENT and self.shell.__dict__.get("_current_index") is not None and self.shell.current_workspace is self and self.session.current != self.key:
                 self.load(self.session.current)
+            elif topic != topics.CURRENT:
+                self.update_edit_lock_state()
+                self._show_names()
         elif topic == topics.VERSIONS and self.key is not None:
             if self.session.active_version(self.key) != self.version and self._is_shown():
                 self.switch_version()
@@ -464,9 +496,11 @@ class DevelopWorkspace(Workspace):
             self.canvas.set_image(None)
             self.frame_label.setText("No photo open")
             self._refresh_history()
+            self.update_edit_lock_state()
             return
         self.version = self.session.active_version(key)
         self.recipe = self.session.recipe(key, self.version).copy()
+        self.update_edit_lock_state()
         self._load_controls()
         self._refresh_history()
         if self._comparing_versions:
@@ -627,6 +661,9 @@ class DevelopWorkspace(Workspace):
     def _commit(self) -> None:
         """A change is finished: record it for undo and hand it to the session."""
         if self.key is None:
+            return
+        if self.locked:                      # nothing is kept for a photo marked for removal
+            self.recipe = self.session.recipe(self.key, self.version).copy()
             return
         snapshot = pr.to_dict(self.session.recipe(self.key, self.version))
         if snapshot != pr.to_dict(self.recipe):
@@ -835,6 +872,8 @@ class DevelopWorkspace(Workspace):
     # -- whole-recipe actions --------------------------------------------------- #
 
     def _replace(self, recipe: pr.Recipe) -> None:
+        if self.locked:
+            return
         self.recipe = recipe
         self._load_controls()
         self._changed()
@@ -876,20 +915,20 @@ class DevelopWorkspace(Workspace):
             return
         self._commit()
         self._clipboard = pr.to_dict(self.recipe)
-        for path in targets:
-            self.session.set_recipe(path, self._settings_from_clipboard(self.session.recipe(path)),
-                                    label=f"Synced from {Path(self.key).name}")
+        synced = self.session.sync_settings(self.recipe, targets, label=f"Synced from {Path(self.key).name}")
+        skipped = len(targets) - len(synced)
         self.session.save_all()
         log = getattr(type(self.shell), "log_action", None)
-        if log is not None:
-            log(self.shell, "develop", f"Synced settings from {Path(self.key).name} to {len(targets):,} photos")
+        if log is not None and synced:
+            log(self.shell, "develop", f"Synced settings from {Path(self.key).name} to {len(synced):,} photos")
         self.status_label.setText(
-            f"Settings copied to {len(targets)} frame(s). Their crops, layers and overlays were kept.")
+            f"Settings copied to {len(synced)} frame(s). Their crops, layers and overlays were kept."
+            + (f" {skipped} rejected frame(s) were skipped: they are locked until restored." if skipped else ""))
 
     # -- virtual copies and history ---------------------------------------------- #
 
     def duplicate(self):
-        """Ctrl+D: a new virtual copy of the version being edited, which
+        """Ctrl+': a new virtual copy of the version being edited, which
         Develop then shows."""
         if self.key is None:
             return None
@@ -943,7 +982,7 @@ class DevelopWorkspace(Workspace):
         self.status_label.setText(f"Back to: {self.session.history(self.key, self.version).steps[index].label}")
 
     def undo(self) -> None:
-        if self._history:
+        if self._history and not self.locked:
             current = pr.to_dict(self.recipe)
             self._future.append(current)
             previous = self._history.pop()
@@ -954,7 +993,7 @@ class DevelopWorkspace(Workspace):
             self._changed()
 
     def redo(self) -> None:
-        if self._future:
+        if self._future and not self.locked:
             current = pr.to_dict(self.recipe)
             self._history.append(current)
             following = self._future.pop()
@@ -1029,8 +1068,9 @@ class DevelopWorkspace(Workspace):
             self.canvas.set_image(clipping_overlay(self._last_render) if self._show_clipping else self._last_render)
 
     def _step(self, offset: int) -> None:
+        """Left / Right: the next photo that can be edited."""
         self._commit()
-        self.session.step(offset)
+        self.session.step(offset, self.session.editable_keys())
 
     def keyPressEvent(self, event) -> None:  # noqa: N802 (Qt naming)
         key, mods = event.key(), event.modifiers()

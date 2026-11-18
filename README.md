@@ -1,6 +1,6 @@
 # Granite Studios
 
-**Current version: v2.07**
+**Current version: v2.08**
 
 ### [⬇️ Download the installer](https://github.com/marufmhoque/GraniteStudios/releases/latest/download/Install-GraniteStudios.bat)
 
@@ -25,7 +25,7 @@ Six workspaces over one folder: **Cull**, **Develop**, **Retouch**, **Design**, 
 - 🖌️ **Retouch**: layers with seven blend modes, AI masks (subject, skin, teeth, eyes, sky…), healing, cloning, skin smoothing that keeps pores, and inpainting that fills straightened corners
 - ✍️ **Design**: vector text, shapes and watermarks that print sharp at any size and export to SVG and PDF
 - 💾 **Non-destructive**: every edit is a small settings file. Nothing is rendered until you export, and your originals are never modified, moved or deleted
-- 🔀 **Virtual copies**: **Ctrl+D** branches any photo into another independent edit (a moody black-and-white and a warm colour grade of the same frame) without copying a single pixel. Each copy is its own tile right beside the original, chipped `v2`, `v3`, compared side by side and exported on its own
+- 🔀 **Virtual copies**: **Ctrl+'** branches any photo into another independent edit (a moody black-and-white and a warm colour grade of the same frame) without copying a single pixel. Each copy is its own tile right beside the original, chipped `v2`, `v3`, compared side by side and exported on its own
 
 ## Granite Studios at a glance
 
@@ -57,7 +57,7 @@ Six workspaces over one folder: **Cull**, **Develop**, **Retouch**, **Design**, 
 | Edit history | Develop's **History** lists every change to a photo, from any workspace, and goes back to any step with a click; kept with the folder's edits |
 | Retouch | Layers (7 blend modes), AI masks (subject, skin, teeth, eyes, iris, lips; hair and sky approximate), click-to-select, one-click Color Splash, healing, cloning, frequency-separation skin smoothing, teeth and eyes, neural inpainting |
 | Design | Vector text, shapes and bezier paths; watermark templates filled from each photo's EXIF; snapping and guides; SVG and PDF output |
-| Export | Web, full-size, 16-bit TIFF, print and 16-bit PNG presets; Instagram sets; panoramic reel; static web gallery; transparent-background PNG |
+| Export | Web, full-size, 16-bit TIFF, print, 16-bit PNG and Instagram 4:5 presets; an export queue that delivers by person in one run; Instagram sets; panoramic reel; static web gallery; transparent-background PNG |
 | Video | Trim, speed, reverse, time-lapse, reframe, stabilise, crop, redact, concat, transitions, loudness, colour and LUTs; bundled FFmpeg |
 
 **The AI models it uses, and why you can trust them.** All run locally. Each is pinned by size and SHA-256, so a corrupted or swapped download is refused. Small ones come with the install; larger ones are fetched only when you say yes.
@@ -80,7 +80,7 @@ Six workspaces over one folder: **Cull**, **Develop**, **Retouch**, **Design**, 
 - Straightening: under **1 degree** residual from scene lines, **0.6 degree** mean from the body when there are no lines
 - Background removal **1.36 times faster** on DirectML than CPU
 - De-blurring recovers **+5.2 dB** on a synthetic 10 px motion smear; a full-quality pass takes about **4 s** on the 1,600 px preview and **66 s** on a 24 MP export (a fast Wiener pass follows the slider in about 150 ms)
-- **693 automated tests** against real engines, 20,300 lines of application code and 5,600 lines of tests
+- **770 automated tests** against real engines, 20,300 lines of application code and 5,600 lines of tests
 
 **What it cannot do yet** (full list with reasons in [PRD.md](PRD.md) section 8):
 
@@ -96,8 +96,8 @@ Six workspaces over one folder: **Cull**, **Develop**, **Retouch**, **Design**, 
 | Where | Keys |
 | --- | --- |
 | Anywhere | **Ctrl+1 to Ctrl+6** switch workspace; **Ctrl+N** new project; **Ctrl+O** open project; **Ctrl+S** save project |
-| Cull | Arrows move; **1-5** stars (0 clears); **6-9** red, yellow, green, blue; **P** pick; **X** reject; **U** clear; **S** survey; **F** face loupe; **Ctrl+D** (or **Ctrl+'**) duplicate as a virtual copy; **Shift+Delete** remove rejected images; **Enter** open in Develop |
-| Develop | Left/Right change frame; **[ / ]** change version; **V** compare versions (**Shift+V** picks which); **\\** before/after; **J** clipping; **Ctrl+Z / Ctrl+Y** undo, redo; **Ctrl+D** new virtual copy; **Ctrl+Shift+C / V** copy, paste settings; **0** fit; **1** 100% |
+| Cull | Arrows move; **1-5** stars (0 clears); **6-9** red, yellow, green, blue; **P** pick; **X** reject; **U** clear; **S** survey; **F** face loupe; **Ctrl+A** select all; **Ctrl+D** select none; **Ctrl+'** duplicate as a virtual copy; **Shift+Delete** remove rejected images; **Enter** open in Develop |
+| Develop | Left/Right change frame; **[ / ]** change version; **V** compare versions (**Shift+V** picks which); **\\** before/after; **J** clipping; **Ctrl+Z / Ctrl+Y** undo, redo; **Ctrl+'** new virtual copy; **Ctrl+Shift+C / V** copy, paste settings; **0** fit; **1** 100% |
 
 **Where to go next:** [Quick Start](#quick-start) to install, [Features](#features) for every control, [Architecture Highlights](#architecture-highlights) for how edits are stored, and [PRD.md](PRD.md) for every requirement with its evidence.
 
@@ -247,7 +247,9 @@ filmstrip along the bottom.
 - **Head roll is still deliberately not used to level.** See the caveat below
 
 ### Reviewing and rejecting
-- **Select All / None / Invert**, scoped to whatever the view filter is showing
+- **Select ▾**: **Select All** (Ctrl+A), **Select None** (Ctrl+D) and **Invert Selection**, scoped to whatever the view filter is showing; then **Select All Duplicates**, **Blurry**, **Blinks**, and **🎯 Select All Misfires & Rejects**, each with its count. A photo you picked or starred is never counted as a misfire unless you rejected it
+- **🧹 Clean Up Misfires…** opens the Clean Up Shoot assistant: the duplicates, blurry photos, blinks and rejects with a tick each (untick the blurry ones to keep them for now), the total to remove and the keepers that stay. **Inspect in Grid** selects them all and scrolls to the first; **🗑️ Remove Selected Photos** rejects them and removes them from the project in one step, and a message says *Removed X misfires. Showing Y keepers.* The files are never deleted or moved: View ▸ Restore Removed Images brings them back
+- **Rejected photos are locked.** Enter or a double-click on one does not open Develop (a message says why); the filmstrips leave them out and Left / Right skip them; Develop, Retouch and Design show **⚠️ Marked for Removal — Editing Disabled** with the controls dimmed, and **↺ Restore Photo** un-rejects it and unlocks everything. Sync and batch edits skip them. An edit made before rejecting is kept
 - **Rejected never means deleted.** The original file is never moved, renamed or removed; it is simply left out of every export
 - **Review Rejected** shows every rejected frame before anything is acted on, with a tick per photo to put it back
 - **Sort: Smart Priority (Keepers First)** puts picks first, then 5-star down to 1-star and AI-starred photos, then unrated keepers. Below a **🔻 Culled & Flagged for Removal (X items)** divider come duplicates, blinks, blurry frames and the rejected, in that order, so you can see exactly what Remove Images will take. A rejected photo never counts as a keeper, whatever its stars. *Capture Order* is the folder's order
@@ -285,7 +287,7 @@ Sharpening lifts edges that survived. **De-Blur** (Develop ▸ Detail) undoes th
 - It recovers detail the blur weakened, not detail it erased. Long smears, a wrong angle and blur that differs across the frame (a moving subject against a still background) limit it. It stays with its own photo when you copy, paste or sync settings
 
 ### Virtual copies (versions)
-- **Branch a photo into several edits.** A virtual copy is a second set of settings for the same original: **Ctrl+D** (Cull or Develop), or right-click ▸ **Duplicate / Create Virtual Copy**, copies only the small settings file, never the pixels. Edit the copy as a high-contrast black and white and the original as a warm colour grade; neither touches the other
+- **Branch a photo into several edits.** A virtual copy is a second set of settings for the same original: **Ctrl+'** (Cull or Develop), or right-click ▸ **Duplicate / Create Virtual Copy**, copies only the small settings file, never the pixels. Edit the copy as a high-contrast black and white and the original as a warm colour grade; neither touches the other
 - **Each copy is its own tile**, right after the original in the grid and the filmstrips: the original is chipped `v1`, its copies `v2`, `v3` (`DSC_0001_v2`). Click a copy's tile to edit it and to select it for export; right-click it to rename or delete it. Ratings, labels, picks and rejection belong to the photo, so they are shared
 - **The version bar** sits above the picture in Develop, Retouch and Design: a pill per version (`Master`, `Copy 1`, `Moody Edit`…). Click one to switch to it; nothing is lost when you do. **+ Version** branches the one you are looking at; **⋯** (or right-click a pill) renames or removes it
 - **+ 3 Styles** branches *Cinematic*, *Warm Analog* and *Clean B&W* from the master in one click, keeping its crop, lens corrections, retouching and watermark. In Cull, the **Versions ▾** menu or a right-click does the same for a whole selection
@@ -296,6 +298,7 @@ Sharpening lifts edges that survived. **De-Blur** (Develop ▸ Detail) undoes th
 - **Layers** with opacity and seven blend modes (normal, multiply, screen, overlay, soft light, colour dodge, luminosity), shown in a panel you can reorder and hide
 - **Adjustment layers** limited by a mask: **AI** (subject, background, person, skin, teeth, eyes, iris, lips; hair and sky are approximate and labelled so), **click-to-select** an object, a **gradient**, or one you **paint** with the brush
 - **Color Splash** (Isolate Object): pick the tool and click an object. It stays in colour and everything else turns black and white, at its own brightness. Click again to add more of the object (a shirt, then the shorts, then a sock), untick the layer to turn it off, lower its Saturation for a partial effect, or tick off **Invert mask** to swap: the object grey, the rest in colour. It is an ordinary adjustment layer in the recipe, so nothing is fixed until export
+- **Color Splash Brush**: the whole photo turns black and white and you paint the colour back. The brush snaps to edges (Low, Medium, High sensitivity), so a stroke over a red dress stays inside the dress; hold **Alt** or choose **Erase to B&W** to paint grey back, **[** and **]** change the size (10–300 px), **Invert** swaps the two and **Reset** starts again. The mask is kept as a file in the edit folder and the layer exports like any other
 - **Heal** removes blemishes and dust with a click; **Clone** copies a patch from one place to another. Both are stored as positions, so they render at full resolution on export
 - **Smooth Skin** evens out blotches while keeping pores (frequency separation, measured on the texture bands); **Whiten Teeth** takes out the yellow without making them glow; **Brighten Eyes** adds clarity to the irises
 
@@ -308,6 +311,7 @@ Sharpening lifts edges that survived. **De-Blur** (Develop ▸ Detail) undoes th
 ### Export
 - **Presets**: Web JPEG (2048 px), full-size JPEG, 16-bit TIFF, print at 300 dpi, 16-bit PNG — each rendering every selected frame with its edits, layers and overlays
 - **Batch watermark** with any of the three templates, filled in per photograph
+- **Export Queue**: several deliveries in one run. Each bundle picks the keepers by who is in them (after **Group by Person** in Cull): *Any of these* people, *Together (All)*, *Solo portraits*, or *Everyone*. Each has its own preset (Web JPEG, Full-Size JPEG, 16-bit TIFF, Print 300 DPI, Instagram 4:5), watermark and subfolder, and shows how many photos it matches. **🚀 Run All Exports** writes every bundle into its own folder under one export folder. A photo two bundles need with the same preset is rendered once and copied; the renders use several cores within the RAM budget. The queue is kept with the folder, and exports never go into the photo folder itself
 - **Instagram** 4:5 feed and 9:16 story, the **panoramic reel**, the **static web gallery** with category tabs, and **background removal** to transparent PNG all use the edited version of each frame
 - Rejected frames are always left out
 
@@ -382,6 +386,7 @@ RAM is profiled at startup and batch work is sized so it never starves the syste
 
 ### 4. Export
 - Choose a **preset** and optional **watermark**, then **Export Selected**. Or make an Instagram set, a reel, or a web gallery from the same edits
+- For deliveries by person (the couple, each family, everyone), add bundles to the **Export Queue** and press **🚀 Run All Exports**
 
 ### 5. Video
 - **Load Video** in the Video workspace and chain operations; each saves into `<video-name>-edit/`, and **Reset to Original** starts over
@@ -426,7 +431,7 @@ python tests/fetch_media.py   # optional: CC0 camera RAW samples and reference f
 pytest
 ```
 
-**693 tests.** They drive the real engines and the real window (headless,
+**770 tests.** They drive the real engines and the real window (headless,
 with `QT_QPA_PLATFORM=offscreen`); nothing is mocked except file dialogs.
 Tests that need a downloaded model or sample file are marked `model` or
 `media` and skip themselves when it is absent.
@@ -470,6 +475,8 @@ Vacation2024/                       # your originals — never modified or moved
     ├── DSC_0001.NEF.granite-v1.json  # a second version ("Copy 1"), settings only
     ├── session.granite.json        # ratings, labels, picks, rejects, version names
     ├── people.granite.json         # who appears where (if you grouped by person)
+    ├── export-queue.granite.json   # the Export Queue's bundles and folder
+    ├── DSC_0001.NEF.granite.assets/  # layer files: heal patches, a painted Color Splash mask
     └── DSC_0002_nobg.png           # background removal output
 ```
 

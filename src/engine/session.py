@@ -289,6 +289,86 @@ class LibrarySession:
         """``paths`` without the rejected ones: the meaning of "rejected"."""
         return [p for p in paths if str(p) not in self.rejected]
 
+    def keepers(self) -> list[Path]:
+        """The working set less the rejected: everything an export may use."""
+        return self.exportable(self.image_paths)
+
+    def images_for_people(self, person_ids, match_mode: str = "ANY") -> list[Path]:
+        """The keepers a set of recognised people picks out, in folder order
+        (see :meth:`PeopleIndex.get_images_for_people`). Removed and
+        rejected photos are never included. ``ALL_PROJECT`` is every keeper,
+        even before anyone has been recognised."""
+        from src.ai_tools import person_clustering as pc
+
+        keepers = self.keepers()
+        if match_mode == pc.MATCH_ALL_PROJECT:
+            return keepers
+        if self.people is None:
+            if match_mode not in pc.MATCH_MODES:
+                raise ValueError(f"Unknown match mode {match_mode!r}")
+            return []
+        return self.people.get_images_for_people(person_ids, match_mode, all_paths=keepers, exclude=self.purged)
+
+    # -- misfires: what the cull and blur triage flagged ----------------------- #
+
+    def _kept_by_hand(self, key: str) -> bool:
+        """Picked or starred by the photographer, and not rejected: a flag
+        from the AI does not overrule that."""
+        return key not in self.rejected and (key in self.picks or bool(self.ratings.get(key)))
+
+    def _flagged(self, test) -> list[Path]:
+        frames = self._frames_by_key()
+        return [p for p in self.image_paths
+                if not self._kept_by_hand(str(p)) and test(str(p), frames.get(str(p)))]
+
+    def get_duplicate_images(self) -> list[Path]:
+        """Photos the burst analysis marked as a weaker duplicate of another."""
+        return self._flagged(lambda key, frame: bool(getattr(frame, "is_duplicate", False)))
+
+    def get_blurry_images(self) -> list[Path]:
+        """Photos blur triage found out of focus or blurred by motion."""
+        def blurry(key, _frame) -> bool:
+            report = self.blur_reports.get(key)
+            return report is not None and (bool(getattr(report, "is_blurry", False))
+                                           or getattr(report, "verdict", "") == "motion_blur")
+        return self._flagged(blurry)
+
+    def get_blink_images(self) -> list[Path]:
+        """Photos where the cull found someone's eyes closed."""
+        return self._flagged(lambda key, frame: bool(getattr(frame, "eyes_closed", False)))
+
+    def get_rejected_images(self) -> list[Path]:
+        """Photos marked rejected (by hand or by a batch action), still in the set."""
+        return [p for p in self.image_paths if str(p) in self.rejected]
+
+    def get_all_misfires(self) -> list[Path]:
+        """Duplicates, blurry photos, blinks and rejected photos, once each,
+        in folder order. Removed photos are not in the set, so never here.
+        A photo you picked or starred is not a misfire unless you rejected it."""
+        bad = {str(p) for group in (self.get_duplicate_images(), self.get_blurry_images(),
+                                    self.get_blink_images(), self.get_rejected_images()) for p in group}
+        return [p for p in self.image_paths if str(p) in bad]
+
+    # -- the edit lock ------------------------------------------------------------- #
+
+    def is_editable(self, path: str | Path | None) -> bool:
+        """Whether a photo may be edited: it is in the working set and not
+        rejected. Rejected and removed photos are locked until restored."""
+        if path is None:
+            return False
+        key = str(path)
+        return key not in self.rejected and key not in self.purged
+
+    def editable_keys(self) -> list[str]:
+        return [k for k in self.keys() if k not in self.rejected]
+
+    def restore_photo(self, path: str | Path) -> None:
+        """Bring a locked photo back: out of the removed list, not rejected."""
+        key = str(path)
+        if key in self.purged:
+            self.restore_purged_images([key])
+        self.set_rejected([key], False)
+
     def set_current(self, path: str | Path | None) -> None:
         key = str(path) if path is not None else None
         if key != self.current:
@@ -555,9 +635,14 @@ class LibrarySession:
         return self._recipes[slot]
 
     def set_recipe(self, path: str | Path, recipe: Recipe, version: int | None = None,
-                   label: str | None = None) -> None:
+                   label: str | None = None) -> bool:
         """Replace a version's recipe. The change is recorded in its history,
-        as ``label`` or, by default, a description of what changed."""
+        as ``label`` or, by default, a description of what changed.
+
+        A rejected or removed photo is locked (:meth:`is_editable`): nothing
+        is changed, a warning is logged, and False is returned."""
+        if not self._may_edit(path):
+            return False
         slot = (str(path), self._version(path, version))
         if slot not in self._baseline:
             self.recipe(*slot)                 # what it was, for the history
@@ -565,9 +650,44 @@ class LibrarySession:
         self._dirty.add(slot)
         self._record(slot, label)
         self.notify(RECIPE)
+        return True
+
+    def _may_edit(self, path) -> bool:
+        if self.is_editable(path):
+            return True
+        logger.warning("Edit refused: %s is marked for removal (restore it to edit it).", Path(path).name)
+        return False
+
+    def apply_recipe(self, paths, recipe, version: int | None = None, label: str | None = None) -> list[str]:
+        """Give each of ``paths`` a recipe: ``recipe`` itself (copied), or
+        ``recipe(path)`` when it is a function. Locked photos are skipped.
+        Returns the photos that were changed."""
+        applied = []
+        for path in paths:
+            new = recipe(path) if callable(recipe) else recipe.copy()
+            if self.set_recipe(path, new, version, label):
+                applied.append(str(path))
+        return applied
+
+    def sync_settings(self, source: Recipe, targets, label: str | None = None) -> list[str]:
+        """Copy ``source``'s tone and colour to each target, keeping the
+        target's own crop, layers, overlays and de-blur. Locked photos are
+        skipped. Returns the photos that were changed."""
+        settings = pr.to_dict(source)
+
+        def synced(path) -> Recipe:
+            target = self.recipe(path)
+            pasted = pr.from_dict(settings)
+            pasted.geometry, pasted.layers, pasted.vectors = target.geometry, target.layers, target.vectors
+            pasted.deblur = target.deblur
+            return pasted
+
+        return self.apply_recipe([p for p in targets if self._may_edit(p)], synced, label=label)
 
     def touch(self, path: str | Path, version: int | None = None, label: str | None = None) -> None:
-        """Record that a recipe was edited in place."""
+        """Record that a recipe was edited in place (not for a locked photo)."""
+        if not self._may_edit(path):
+            return
         slot = (str(path), self._version(path, version))
         self._dirty.add(slot)
         if slot in self._recipes:

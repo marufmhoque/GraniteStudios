@@ -8,6 +8,10 @@ Tools (left rail), used with the left mouse button; the middle button pans:
     Select   click an object to select it with the AI model
     Color Splash  click an object to keep it in colour and turn the rest
              black and white (Isolate Object); click again to add to it
+    Color Splash Brush  paint colour back into a black-and-white photo;
+             the brush snaps to edges, so it stays inside what you paint.
+             Alt (or Erase to B&W) paints black and white back; [ and ]
+             change the size; Invert swaps the two; Reset starts again
 
 Every tool writes to a layer in the frame's recipe, never to pixels. Heal
 spots and clone stamps are stored as positions, so they render at full
@@ -22,18 +26,20 @@ from pathlib import Path
 
 import numpy as np
 from PyQt6.QtCore import QPointF, Qt
-from PyQt6.QtGui import QColor, QPen
+from PyQt6.QtGui import QColor, QKeySequence, QPen, QShortcut
 from PyQt6.QtWidgets import (
     QApplication, QButtonGroup, QCheckBox, QComboBox, QHBoxLayout, QLabel, QListWidget,
     QListWidgetItem, QMessageBox, QPushButton, QRadioButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
+from src.ai_tools import smart_brush
 from src.engine import develop_pipeline as dp
 from src.engine import layer_stack
 from src.engine import parametric_recipe as pr
 from src.engine import session as topics
-from src.ui.widgets.canvas import ImageCanvas
+from src.ui.widgets.canvas import CANVAS_MODE_COLOR_SPLASH_BRUSH, CANVAS_MODE_NORMAL, ImageCanvas
 from src.ui.widgets.controls import Section, SliderRow
+from src.ui.widgets.edit_lock import EditLockBanner, apply_lock
 from src.ui.widgets.filmstrip import Filmstrip
 from src.ui.widgets.renderer import LatestOnlyRenderer
 from src.ui.widgets.versions import VersionBar
@@ -42,7 +48,8 @@ from src.ui.workspaces.base import Workspace
 logger = logging.getLogger(__name__)
 
 PREVIEW_SIDE = 1600
-TOOLS = ("heal", "clone", "brush", "select", "splash")
+TOOLS = ("heal", "clone", "brush", "select", "splash", "splash_brush")
+SPLASH_MIN, SPLASH_MAX = 10, 300          # the Color Splash Brush's diameter, in preview pixels
 AI_KINDS = ("subject", "background", "person", "skin", "teeth", "eyes", "iris", "lips", "hair", "sky")
 ADJUST = (("exposure", "Exposure", -3.0, 3.0, 0.05, 2), ("contrast", "Contrast", -100, 100, 1, 0),
           ("saturation", "Saturation", -100, 100, 1, 0), ("temperature", "Temperature", -100, 100, 1, 0),
@@ -75,6 +82,13 @@ class RetouchWorkspace(Workspace):
         self._clone_source: tuple[float, float] | None = None
         self._stroke: list | None = None
         self._cursor: tuple[float, float] | None = None
+        self._brush = smart_brush.SmartBrushEngine()
+        self._splash_mask: np.ndarray | None = None       # 255 = colour revealed, at the preview's size
+        self._splash_colour: np.ndarray | None = None
+        self._splash_grey: np.ndarray | None = None
+        self._splash_for = None
+        self._splash_layer: int | None = None
+        self._splash_last: tuple[float, float] | None = None
         self.renderer = LatestOnlyRenderer(self)
         self.renderer.ready.connect(self._on_rendered)
         self.renderer.failed.connect(lambda m: self.status_label.setText(f"Preview failed: {m}"))
@@ -99,6 +113,8 @@ class RetouchWorkspace(Workspace):
             ("select", "Select", "Click an object to select it with the AI model"),
             ("splash", "Color Splash", "Isolate Object: click an object to keep it in colour and turn "
                                        "everything else black and white. Click again to add more of it."),
+            ("splash_brush", "Color Splash Brush", "Paint colour back into a black-and-white photo. The brush "
+                                                   "stops at edges; Alt erases; [ and ] change its size."),
         )):
             button = QRadioButton(label)
             button.setToolTip(tip)
@@ -139,6 +155,7 @@ class RetouchWorkspace(Workspace):
         rail_host.setLayout(rail)
         rail_host.setFixedWidth(210)
         outer.addWidget(rail_host)
+        self.rail_host = rail_host
 
         centre = QVBoxLayout()
         centre.setContentsMargins(6, 10, 6, 8)
@@ -150,7 +167,15 @@ class RetouchWorkspace(Workspace):
         self.version_bar = VersionBar(self.session, self._commit)
         centre.addWidget(self.version_bar)
         centre.addWidget(note)
+        self.lock_banner = EditLockBanner()
+        self.lock_banner.restore_requested.connect(self.restore_photo)
+        centre.addWidget(self.lock_banner)
         self.canvas = ImageCanvas()
+        self.splash_bar = self._build_splash_bar()
+        centre.addWidget(self.splash_bar)
+        for keys, factor in (("[", 1 / 1.2), ("]", 1.2)):
+            QShortcut(QKeySequence(keys), self, activated=lambda f=factor: self._resize_splash(f),
+                      context=Qt.ShortcutContext.WidgetWithChildrenShortcut)
         self.canvas.pan_with_left_button = False
         self.canvas.pressed.connect(self._on_press)
         self.canvas.dragged.connect(self._on_drag)
@@ -225,6 +250,197 @@ class RetouchWorkspace(Workspace):
         panel.addStretch()
         scroll.setWidget(panel_host)
         outer.addWidget(scroll)
+        self.controls_container = scroll
+
+    def _lockable(self) -> list:
+        return [self.rail_host, self.controls_container, self.version_bar, self.splash_bar]
+
+    # -- the Color Splash Brush -------------------------------------------------------- #
+
+    def _build_splash_bar(self) -> QWidget:
+        """Size, edge snapping, paint or erase, invert and reset."""
+        bar = QWidget()
+        row = QHBoxLayout(bar)
+        row.setContentsMargins(0, 2, 0, 2)
+        row.setSpacing(8)
+        self.splash_size = SliderRow("Size", SPLASH_MIN, SPLASH_MAX, 80, 1, 0, label_width=34)
+        self.splash_size.setToolTip("Brush diameter in pixels ( [ smaller, ] larger )")
+        self.splash_size.setMinimumWidth(200)
+        self.splash_size.changed.connect(lambda v: self.canvas.set_brush(radius=v / 2.0))
+        row.addWidget(self.splash_size)
+        self.splash_snap = QCheckBox("Edge Snapping")
+        self.splash_snap.setChecked(True)
+        self.splash_snap.setToolTip("Stop the stroke at the edges of the object under the brush")
+        row.addWidget(self.splash_snap)
+        self.splash_sensitivity = QComboBox()
+        self.splash_sensitivity.addItems(list(smart_brush.SENSITIVITY_LEVELS))
+        self.splash_sensitivity.setCurrentText("Medium")
+        self.splash_sensitivity.setToolTip("How faint an edge stops the brush, and how close a colour must be")
+        self.splash_snap.toggled.connect(self.splash_sensitivity.setEnabled)
+        row.addWidget(self.splash_sensitivity)
+        self.splash_mode = QButtonGroup(self)
+        self.splash_paint_button = QPushButton("\U0001F58C\ufe0f Paint Color")
+        self.splash_erase_button = QPushButton("\U0001F9F9 Erase to B&&W")
+        for index, button in enumerate((self.splash_paint_button, self.splash_erase_button)):
+            button.setCheckable(True)
+            button.setObjectName("SecondaryButton")
+            self.splash_mode.addButton(button, index)
+            row.addWidget(button)
+        self.splash_paint_button.setChecked(True)
+        self.splash_erase_button.setToolTip("Paint black and white back (or hold Alt while painting)")
+        self.splash_mode.idToggled.connect(lambda *_: self.canvas.set_brush(erase=self._splash_erasing_mode()))
+        invert = self._button("Invert", self.splash_invert, "Swap what is in colour and what is black and white")
+        reset = self._button("Reset", self.splash_reset, "Back to all black and white")
+        row.addWidget(invert)
+        row.addWidget(reset)
+        row.addStretch()
+        bar.setVisible(False)
+        return bar
+
+    def _splash_erasing_mode(self) -> bool:
+        return self.splash_mode.checkedId() == 1
+
+    def _splash_radius(self) -> int:
+        return max(1, int(round(self.splash_size.value() / 2.0)))
+
+    def _splash_sensitivity(self) -> float:
+        return smart_brush.SENSITIVITY_LEVELS.get(self.splash_sensitivity.currentText(), 0.6)
+
+    def _resize_splash(self, factor: float) -> None:
+        """[ and ]: the brush smaller or larger."""
+        if self._tool() == "splash_brush":
+            size = min(SPLASH_MAX, max(SPLASH_MIN, round(self.splash_size.value() * factor)))
+            self.splash_size.set_value(size)
+            self.canvas.set_brush(radius=size / 2.0)
+            self.status_label.setText(f"Brush size {size} px")
+
+    def _splash_index(self) -> int | None:
+        layers = self._layers()
+        return next((i for i in range(len(layers) - 1, -1, -1) if layer_stack.is_splash_brush(layers[i])), None)
+
+    def _ensure_splash(self) -> bool:
+        """A Color Splash Brush layer to paint into, its mask, and the colour
+        and black-and-white pictures the live preview mixes between."""
+        if self.key is None or self.base is None or self.edit_folder is None or self.locked:
+            return False
+        h, w = self.base.shape[:2]
+        if self._splash_index() is None:
+            name = layer_stack.save_mask_asset(self.key, self.edit_folder,
+                                               layer_stack.splash_brush_asset(self.version),
+                                               np.zeros((h, w), np.uint8))
+            self._add(layer_stack.color_splash_brush_layer(name))
+        index = self._splash_index()
+        layers = self._layers()
+        layer = layers[index]
+        others = [layer_stack.layer_to_dict(l) for i, l in enumerate(layers) if i != index]
+        marker = (self.key, self.version, id(self.base), layer.mask.params.get("asset"),
+                  repr(layer.recipe), layer.opacity, repr(others))
+        if self._splash_for != marker or self._splash_mask is None:
+            mask = layer_stack.load_mask_asset(self.key, self.edit_folder, layer.mask.params.get("asset", ""), (w, h))
+            self._splash_mask = mask if mask is not None else np.zeros((h, w), np.uint8)
+            if layer.mask.invert is False:              # an inverted layer: the stored mask means B&W
+                self._splash_mask = 255 - self._splash_mask
+            everywhere = layer_stack.layer_from_dict(layer_stack.layer_to_dict(layer))
+            everywhere.mask = layer_stack.Mask()
+            everywhere.visible = True
+            ctx = self._ctx()
+            self._splash_colour = layer_stack.composite(self.base, [l for i, l in enumerate(layers) if i != index], ctx)
+            self._splash_grey = layer_stack.composite(
+                self.base, [everywhere if i == index else l for i, l in enumerate(layers)], ctx)
+            self._splash_for = marker
+            self._splash_layer = index
+        return True
+
+    def _splash_point(self, x: float, y: float) -> tuple[float, float]:
+        h, w = self.base.shape[:2]
+        return x * w, y * h
+
+    def _splash_paint(self, start, end) -> None:
+        erase = self._splash_erasing_mode() or bool(
+            QApplication.keyboardModifiers() & Qt.KeyboardModifier.AltModifier)
+        _, rect = self._brush.paint_line(self.base, self._splash_mask, start, end, self._splash_radius(),
+                                         self._splash_sensitivity(), erase, self.splash_snap.isChecked())
+        if rect.empty:
+            return
+        ys, xs = slice(rect.y, rect.y + rect.h), slice(rect.x, rect.x + rect.w)
+        patch = smart_brush.reveal_preview(self._splash_colour[ys, xs], self._splash_mask[ys, xs],
+                                           self._splash_grey[ys, xs])
+        self.canvas.update_region(patch, rect.x, rect.y)
+
+    def _splash_press(self, x: float, y: float) -> None:
+        if not self._ensure_splash():
+            if self.base is None:
+                self.status_label.setText("The photo is still loading.")
+            return
+        self.canvas.set_image(smart_brush.reveal_preview(self._splash_colour, self._splash_mask, self._splash_grey))
+        point = self._splash_point(x, y)
+        self._splash_last = point
+        self._splash_paint(point, point)
+
+    def _splash_drag(self, x: float, y: float) -> None:
+        if self._splash_last is None or self._splash_mask is None:
+            return
+        point = self._splash_point(x, y)
+        self._splash_paint(self._splash_last, point)
+        self._splash_last = point
+
+    def _splash_release(self) -> None:
+        if self._splash_last is None:
+            return
+        self._splash_last = None
+        self._save_splash("Color Splash Brush")
+
+    def _save_splash(self, label: str) -> None:
+        """Write the mask beside the photo's other layer files and record the
+        stroke in the recipe (a new revision, so the history sees it)."""
+        index = self._splash_index()
+        if index is None or self._splash_mask is None or self.locked:
+            return
+        layers = self._layers()
+        layer = layers[index]
+        stored = self._splash_mask if layer.mask.invert else 255 - self._splash_mask
+        name = layer_stack.save_mask_asset(self.key, self.edit_folder, layer.mask.params.get("asset")
+                                           or layer_stack.splash_brush_asset(self.version), stored)
+        layer.mask.params = {**layer.mask.params, "asset": name,
+                             "revision": int(layer.mask.params.get("revision", 0)) + 1}
+        self.recipe.layers = [layer_stack.layer_to_dict(l) for l in layers]
+        self._splash_for = None                 # the full render below is the new truth
+        self._refresh_list(index)
+        self._render()
+        if self.key is not None and not self.locked:
+            self.session.set_recipe(self.key, self.recipe.copy(), self.version, label=label)
+
+    def splash_invert(self) -> None:
+        """Swap what is in colour and what is black and white."""
+        if self._ensure_splash():
+            self._splash_mask = 255 - self._splash_mask
+            self._save_splash("Color Splash Brush: invert")
+
+    def splash_reset(self) -> None:
+        """Clear the painting: the whole photo black and white again."""
+        if self._ensure_splash():
+            self._splash_mask[...] = 0
+            self._save_splash("Color Splash Brush: reset")
+
+
+    # -- the edit lock --------------------------------------------------------- #
+
+    @property
+    def locked(self) -> bool:
+        return self.key is not None and not self.session.is_editable(self.key)
+
+    def update_edit_lock_state(self) -> bool:
+        """Disable editing, and show the banner, while the photo is rejected
+        or removed. Returns True when it may be edited."""
+        return apply_lock(self.session, self.key, self.lock_banner, self._lockable())
+
+    def restore_photo(self) -> None:
+        """↺ Restore Photo: no longer rejected, back in the project; editable."""
+        if self.key is None:
+            return
+        self.session.restore_photo(self.key)
+        self.update_edit_lock_state()
+        self.status_label.setText(f"Restored {Path(self.key).name}: it can be edited again.")
 
     def _button(self, text, slot, tip="") -> QPushButton:
         button = QPushButton(text)
@@ -246,6 +462,7 @@ class RetouchWorkspace(Workspace):
             self._show_name()
             self._refresh_list()
             self._render(rebuild_base=True)
+            self.update_edit_lock_state()
 
     def on_leave(self) -> None:
         self.session.save_recipes()
@@ -255,10 +472,12 @@ class RetouchWorkspace(Workspace):
             self.key, self.source, self.base = None, None, None
             self.canvas.set_image(None)
             self.filmstrip.rebuild()
-        elif topic in (topics.CURRENT, topics.MARKS):
+        elif topic in (topics.CURRENT, topics.MARKS, topics.PURGED):
             self.filmstrip.refresh()
             if topic == topics.CURRENT and self.shell.__dict__.get("_current_index") is not None and self.shell.current_workspace is self and self.session.current != self.key:
                 self.load(self.session.current)
+            elif topic != topics.CURRENT:
+                self.update_edit_lock_state()
         elif topic == topics.VERSIONS and self.key is not None:
             shown = self.shell.__dict__.get("_current_index") is not None and self.shell.current_workspace is self
             if shown and self.session.active_version(self.key) != self.version:
@@ -282,9 +501,11 @@ class RetouchWorkspace(Workspace):
         if key is None:
             self.source = None
             self.canvas.set_image(None)
+            self.update_edit_lock_state()
             return
         self.version = self.session.active_version(key)
         self.recipe = self.session.recipe(key, self.version).copy()
+        self.update_edit_lock_state()
         self._show_name()
         self._refresh_list()
         self.canvas.caption = "Loading…"
@@ -347,12 +568,14 @@ class RetouchWorkspace(Workspace):
     # -- layers ------------------------------------------------------------------------ #
 
     def _store(self, layers: list[layer_stack.Layer], select: int | None = None) -> None:
+        if self.locked:
+            return
         self.recipe.layers = [layer_stack.layer_to_dict(layer) for layer in layers]
         self._refresh_list(select)
         self._render()
 
     def _commit(self) -> None:
-        if self.key is not None:
+        if self.key is not None and not self.locked:
             self.session.set_recipe(self.key, self.recipe.copy(), self.version)
 
     def _refresh_list(self, select: int | None = None) -> None:
@@ -502,6 +725,13 @@ class RetouchWorkspace(Workspace):
 
     def _on_tool_changed(self) -> None:
         self._clone_source = None
+        brush = self._tool() == "splash_brush"
+        self.splash_bar.setVisible(brush)
+        self.canvas.set_mode(CANVAS_MODE_COLOR_SPLASH_BRUSH if brush else CANVAS_MODE_NORMAL)
+        self.canvas.set_brush(radius=self._splash_radius(), erase=self._splash_erasing_mode())
+        if brush:
+            self.status_label.setText("Color Splash Brush: paint to bring colour back. It stops at edges; "
+                                      "hold Alt to erase; [ and ] change the size.")
         self.canvas.update()
 
     def _radius(self) -> float:
@@ -518,6 +748,13 @@ class RetouchWorkspace(Workspace):
 
     def _on_press(self, x: float, y: float, button) -> None:
         if self.key is None or button != Qt.MouseButton.LeftButton or not (0 <= x <= 1 and 0 <= y <= 1):
+            return
+        if self.locked:                      # a photo marked for removal is not retouched
+            self.status_label.setText("Editing disabled: this photo is marked for removal. "
+                                      "Click ↺ Restore Photo to edit it.")
+            return
+        if self._tool() == "splash_brush":
+            self._splash_press(x, y)
             return
         tool = self._tool()
         if tool == "heal":
@@ -555,12 +792,18 @@ class RetouchWorkspace(Workspace):
             self._color_splash(x, y)
 
     def _on_drag(self, x: float, y: float) -> None:
+        if self._splash_last is not None:
+            self._splash_drag(x, y)
+            return
         self._cursor = (x, y)
         if self._stroke is not None:
             self._stroke[0]["points"].append([round(x, 5), round(y, 5)])
         self.canvas.update()
 
     def _on_release(self, _x: float, _y: float) -> None:
+        if self._splash_last is not None:
+            self._splash_release()
+            return
         if self._stroke is None:
             return
         stroke, self._stroke = self._stroke[0], None

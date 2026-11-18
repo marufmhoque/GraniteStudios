@@ -62,6 +62,18 @@ EMBEDDINGS_FILENAME = "people.granite.npz"
 
 NOISE = -1
 
+# How a set of people picks photographs (get_images_for_people).
+MATCH_ANY = "ANY"                   # at least one of them is in the photo
+MATCH_ALL = "ALL"                   # every one of them is in it, together
+MATCH_SOLO = "SOLO"                 # one of them, alone: nobody else's face is in it
+MATCH_ALL_PROJECT = "ALL_PROJECT"   # every keeper, whoever is in it
+MATCH_MODES = (MATCH_ANY, MATCH_ALL, MATCH_SOLO, MATCH_ALL_PROJECT)
+
+
+def person_id(value) -> int:
+    """A person id as the index keeps it. Ids arrive as ``3`` or ``"3"``."""
+    return int(str(value).strip())
+
 
 # --------------------------------------------------------------------- #
 # Embedding
@@ -222,6 +234,64 @@ class PeopleIndex:
         """Person ids, most-photographed first."""
         return sorted(self.people, key=lambda pid: (-len(self.paths_of(pid)), pid))
 
+    # -- who is in which photo ---------------------------------------------- #
+
+    def known_paths(self) -> list[str]:
+        """Every photograph with a face in it, sorted by path."""
+        paths = {ref.path for refs in self.people.values() for ref in refs}
+        paths.update(ref.path for ref in self.unassigned)
+        return sorted(paths)
+
+    def people_in(self) -> dict[str, tuple[set[int], int]]:
+        """For each photograph: the people recognised in it, and how many
+        faces in it belong to nobody known (seen only once)."""
+        found: dict[str, tuple[set[int], int]] = {}
+        for pid, refs in self.people.items():
+            for ref in refs:
+                found.setdefault(ref.path, (set(), 0))[0].add(pid)
+        for ref in self.unassigned:
+            people, strangers = found.get(ref.path, (set(), 0))
+            found[ref.path] = (people, strangers + 1)
+        return found
+
+    def get_images_for_people(self, person_ids, match_mode: str = MATCH_ANY, all_paths=None,
+                              exclude=()) -> list[Path]:
+        """The photographs a set of people picks out.
+
+        ``match_mode`` is one of :data:`MATCH_MODES`:
+
+        * ``ANY``: at least one of ``person_ids`` is in the photo.
+        * ``ALL``: all of them are, together.
+        * ``SOLO``: exactly one person is, and they are one of ``person_ids``
+          (a face the index could not place counts as somebody else).
+        * ``ALL_PROJECT``: every photo, whoever is in it.
+
+        ``all_paths`` is the working set (the keepers, in order); when it
+        is given the result keeps its order and nothing outside it is
+        returned. ``exclude`` (removed photos) is always left out.
+        """
+        if match_mode not in MATCH_MODES:
+            raise ValueError(f"Unknown match mode {match_mode!r}. Choose from: {', '.join(MATCH_MODES)}")
+        excluded = {str(p) for p in exclude}
+        order = [str(p) for p in all_paths] if all_paths is not None else self.known_paths()
+        order = [p for p in dict.fromkeys(order) if p not in excluded]
+        if match_mode == MATCH_ALL_PROJECT:
+            return [Path(p) for p in order]
+        wanted = {person_id(p) for p in person_ids}
+        if not wanted:
+            return []
+        found = self.people_in()
+
+        def matches(path: str) -> bool:
+            people, strangers = found.get(path, (set(), 0))
+            if match_mode == MATCH_ANY:
+                return bool(people & wanted)
+            if match_mode == MATCH_ALL:
+                return wanted <= people
+            return len(people) == 1 and strangers == 0 and people <= wanted   # SOLO
+
+        return [Path(p) for p in order if matches(p)]
+
     # -- persistence: the edit folder only, never beside the originals ---- #
 
     def save(self, edit_folder: str | Path, embeddings: np.ndarray | None = None) -> Path:
@@ -270,6 +340,14 @@ class PeopleIndex:
                 target.unlink()
                 removed += 1
         return removed
+
+
+def get_images_for_people(edit_folder: str | Path, person_ids, match_mode: str = MATCH_ANY,
+                          all_paths=None, exclude=()) -> list[Path]:
+    """:meth:`PeopleIndex.get_images_for_people` on the folder's saved
+    ``people.granite.json``. With no saved index, only ``ALL_PROJECT``
+    finds anything."""
+    return PeopleIndex.load(edit_folder).get_images_for_people(person_ids, match_mode, all_paths, exclude)
 
 
 def cluster_frames(
