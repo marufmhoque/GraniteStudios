@@ -655,7 +655,7 @@ De-Blur), `ai_tools/segmentation.py` (`Segmenter.face`).
 | --- | --- | --- | --- |
 | FR-21.1 | Version check | Reads `__version__` from `src/__init__.py` on GitHub's `main` (`raw.githubusercontent.com`), generic User-Agent, 5 s timeout; any failure is "no update", silently | **Done** |
 | FR-21.2 | Once a day, optional | Runs at startup in the background when 24 h have passed; **Check Automatically at Startup** turns it off (`~/.granitestudios/updates.json`); never runs when a window is merely constructed (tests, installer smoke test) | **Done** |
-| FR-21.3 | Offer, not force | A newer version shows **Update to vX.YY** in the top bar; the version menu has **Check for Updates Now** | **Done** |
+| FR-21.3 | Offer, not force | A newer version shows **Update to vX.YY** in the top bar; the version menu and **File ▸ Check for Updates…** (2.07) check now | **Done** |
 | FR-21.4 | One-click update | Confirms, starts `Update Granite Studios.bat` with `GRANITE_RELAUNCH=1`, closes the app (saving the session); the installer waits up to 30 s for it to exit and reopens it when done | **Done** |
 | FR-21.5 | Local updater | The installer copies the one-file bootstrap into the install folder and adds **Start Menu > Update Granite Studios**; each update refreshes it | **Done** |
 | FR-21.6 | No needless download | The bootstrap compares the installed and GitHub versions first; when current it says so and asks before reinstalling | **Done** |
@@ -688,7 +688,7 @@ launch are replaced in tests.
 | FR-22.12 | Move the project file | `relocate_project_file`: the file is written at its new place (the folder is created) before the old one is removed; an existing file there is never replaced; the recent entry follows | **Done** (2.06) |
 | FR-22.13 | Relink a photo folder | `relink_source_folder`: every photo path, removed photo and the selected photo are rewritten under the new folder, photo IDs are kept, the folder is re-indexed, and the `-edit` folder is carried across (renamed `<new>-edit` if it moved with the photos, copied if the old folder remains, left alone if the new folder has its own) so recipes, marks, virtual copies and history stay attached; returns how many of the project's photos are there | **Done** (2.06) |
 | FR-22.14 | Missing folders | `verify_media_accessibility` returns whether every folder is there and the ones that are not; opening a project with one missing asks *"The folder '…' could not be found. Would you like to locate it now?"* and relinks it | **Done** (2.06) |
-| FR-22.15 | Project Settings | File menu, Ctrl+Shift+P: name, file path with Move, a folder table (🟢 Connected / 🔴 Missing, Relink Folder), applied together on Save or not at all; the Hub's right-click menu offers Rename, Relink Folders, Move Project File, Show in Explorer / Finder, Remove from Recent List | **Done** (2.06) |
+| FR-22.15 | Project Settings | File menu, Ctrl+Shift+P: name, file path with Move, a folder table (🟢 Connected / 🔴 Missing, Relink Folder), applied together on Save or not at all; the Hub has a visible **Rename…** button (F2) and a **More ▾** menu, also on right-click, with Rename, Relink Folders, Move Project File, Show in Explorer / Finder, Remove from Recent List | **Done** (2.06) |
 | FR-22.16 | Add a folder to a project | A project opening more than one folder | **Not built** — see FR-22.8 |
 
 All of this writes only the project file, the recent list and the app's own `-edit` folder; the photos are never touched (INV-1, hashed in `test_project_settings.py`).

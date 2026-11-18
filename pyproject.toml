@@ -1,6 +1,6 @@
 [project]
 name = "granite-studios"
-version = "2.06"
+version = "2.07"
 description = "Local-first AI photo and video editing suite"
 readme = "README.md"
 requires-python = ">=3.11"

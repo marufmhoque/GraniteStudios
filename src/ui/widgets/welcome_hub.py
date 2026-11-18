@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 
 from PyQt6.QtCore import QSize, Qt
-from PyQt6.QtGui import QIcon, QPixmap
+from PyQt6.QtGui import QIcon, QKeySequence, QPixmap, QShortcut
 from PyQt6.QtWidgets import (
     QCheckBox, QDialog, QFileDialog, QFormLayout, QFrame, QHBoxLayout, QInputDialog, QLabel, QLineEdit,
     QListWidget, QListWidgetItem, QMenu, QMessageBox, QPushButton, QVBoxLayout, QWidget,
@@ -125,6 +125,8 @@ class WelcomeHub(QDialog):
         self.list.setObjectName("RecentList")
         self.list.setIconSize(QSize(96, 64))
         self.list.itemActivated.connect(self._open_item)
+        self.list.currentItemChanged.connect(lambda *_: self._update_buttons())
+        QShortcut(QKeySequence("F2"), self, activated=self.rename_selected)
         self.list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.list.customContextMenuRequested.connect(self._on_context_menu)
         right.addWidget(self.list, stretch=1)
@@ -132,6 +134,16 @@ class WelcomeHub(QDialog):
         self.empty_note.setObjectName("PageSubtitle")
         right.addWidget(self.empty_note)
         row = QHBoxLayout()
+        self.rename_button = QPushButton("✏️ Rename…")
+        self.rename_button.setObjectName("SecondaryButton")
+        self.rename_button.setToolTip("Rename the selected project (F2)")
+        self.rename_button.clicked.connect(self.rename_selected)
+        self.more_button = QPushButton("More ▾")
+        self.more_button.setObjectName("SecondaryButton")
+        self.more_button.setToolTip("Relink folders, move the file, show it in Explorer, or remove it from the list")
+        self.more_button.clicked.connect(self._show_more)
+        row.addWidget(self.rename_button)
+        row.addWidget(self.more_button)
         row.addStretch()
         self.open_recent_button = QPushButton("Open")
         self.open_recent_button.setObjectName("ActionButton")
@@ -177,6 +189,31 @@ class WelcomeHub(QDialog):
         first = next((i for i in range(self.list.count()) if self.list.item(i).flags() & Qt.ItemFlag.ItemIsEnabled), None)
         if first is not None:
             self.list.setCurrentRow(first)
+        self._update_buttons()
+
+    def _selected_path(self) -> str | None:
+        item = self.list.currentItem()
+        return item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+
+    def _update_buttons(self) -> None:
+        path = self._selected_path()
+        usable = path is not None and Path(path).is_file()
+        locked = path is not None and self.locked_path is not None and str(self.locked_path) == str(path)
+        self.rename_button.setEnabled(usable and not locked)
+        self.rename_button.setToolTip("This project is open: use File ▸ Project Settings."
+                                      if locked else "Rename the selected project (F2)")
+        self.more_button.setEnabled(path is not None)
+
+    def rename_selected(self) -> bool:
+        path = self._selected_path()
+        if path is None or not self.rename_button.isEnabled():
+            return False
+        return self.rename_project(path)
+
+    def _show_more(self) -> None:
+        item = self.list.currentItem()
+        if item is not None:
+            self.context_menu(item).exec(self.more_button.mapToGlobal(self.more_button.rect().bottomLeft()))
 
     # -- right-click: rename, relink, move, show, forget ---------------------------- #
 

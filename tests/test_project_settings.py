@@ -503,6 +503,28 @@ def test_the_hub_menu_is_careful_with_the_open_project_and_missing_files(qapp, l
     assert _by(actions, "Remove").isEnabled()
 
 
+def test_the_hub_has_a_visible_rename_button_and_f2(qapp, library, tmp_path, monkeypatch):
+    from src.ui.widgets.welcome_hub import WelcomeHub
+
+    recent = pm.RecentProjects(tmp_path / "recent.json")
+    project = pm.create_project("Alpha", library, tmp_path / "p")
+    recent.remember(project, 7, 5)
+    hub = WelcomeHub(recent)
+    assert hub.rename_button.isEnabled() and hub.more_button.isEnabled()
+    names = iter(["Beta", "Gamma"])
+    monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: (next(names), True)))
+    hub.rename_button.click()
+    assert hub.list.item(0).text().startswith("Beta\n") and (tmp_path / "p" / "Beta.granite").is_file()
+    assert hub.rename_selected()                                  # what F2 calls
+    assert hub.list.item(0).text().startswith("Gamma\n")
+
+    locked = WelcomeHub(pm.RecentProjects(tmp_path / "recent.json"), locked_path=str(tmp_path / "p" / "Gamma.granite"))
+    assert not locked.rename_button.isEnabled() and "File" in locked.rename_button.toolTip()
+    assert not locked.rename_selected()
+    empty = WelcomeHub(pm.RecentProjects(tmp_path / "none.json"))
+    assert not empty.rename_button.isEnabled() and not empty.more_button.isEnabled()
+
+
 def test_show_in_explorer_opens_the_right_file_manager(library, tmp_path, monkeypatch):
     started = []
     monkeypatch.setattr(pm.subprocess, "Popen", lambda args, **k: started.append(args))
@@ -517,3 +539,12 @@ def test_show_in_explorer_opens_the_right_file_manager(library, tmp_path, monkey
         assert started[-1] == expected
     monkeypatch.setattr(pm.subprocess, "Popen", lambda *a, **k: (_ for _ in ()).throw(OSError("no manager")))
     assert pm.reveal_in_file_manager(target) is False
+
+
+def test_the_file_menu_can_check_for_updates(harness, monkeypatch):
+    w = harness.window
+    asked = []
+    monkeypatch.setattr(w, "check_for_updates", lambda manual=True: asked.append(manual))
+    assert w.check_updates_action.text().startswith("Check for Updates")
+    w.check_updates_action.trigger()
+    assert asked == [True]

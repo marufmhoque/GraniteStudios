@@ -1,6 +1,6 @@
 # Granite Studios
 
-**Current version: v2.06**
+**Current version: v2.07**
 
 ### [⬇️ Download the installer](https://github.com/marufmhoque/GraniteStudios/releases/latest/download/Install-GraniteStudios.bat)
 
@@ -120,7 +120,7 @@ You never need to come back to GitHub to update:
   from GitHub. When there is a newer one, an **Update to v2.xx** button appears
   in the top bar. Click it: the app saves and closes, the update installs, and
   the app reopens by itself. The version in the top bar (for example `v2.01`)
-  opens a menu with **Check for Updates Now** and **Check Automatically at
+  opens a menu with **Check for Updates Now** (also **File ▸ Check for Updates…**) and **Check Automatically at
   Startup** (untick it to stop the daily check; nothing is ever sent).
 - **From the Start Menu.** **Update Granite Studios** runs the same updater.
   It compares your version with GitHub's first: if you are already current it
@@ -261,7 +261,7 @@ filmstrip along the bottom.
 - **📋 History** (top right) slides out the project's activity drawer: a **workflow checklist** (Ingest, Cull, Blur Triage, Auto-Level, Develop with *X/Y completed*, Export) and a **timeline** of every batch operation with its time ("Smart Cull: 420 keepers starred", "Removed 1,200 culled photos"). It is saved in the `.granite` file; work done before a project existed is kept by a project made from that folder
 - **File ▸ Project Settings** (Ctrl+Shift+P, Cmd+Shift+P on a Mac) renames the project, moves its `.granite` file and relinks its photo folders. Nothing changes until **Save**, and then everything is applied together or not at all. The photos are never touched
 - **Moved or renamed a photo folder?** Opening the project says *"The folder '…' could not be found. Would you like to locate it now?"* and relinks it to where you point. Every photo, the removed photos and the selected photo follow, and the folder's `-edit` folder (ratings, edits, virtual copies, history) comes along under the new folder's name, so nothing detaches
-- **Right-click a recent project** in the Hub: ✏️ Rename, 📁 Relink Folders, 📦 Move Project File, 🔍 Show in Explorer / Finder, ❌ Remove from Recent List (which only forgets the entry; the file stays). The project that is open is changed from Project Settings instead
+- **In the Hub**, select a recent project and press **✏️ Rename…** (or F2); **More ▾** and a right-click open the rest: ✏️ Rename, 📁 Relink Folders, 📦 Move Project File, 🔍 Show in Explorer / Finder, ❌ Remove from Recent List (which only forgets the entry; the file stays). The project that is open is changed from Project Settings instead
 - A project holds one folder for now (the file format already allows several)
 - **Show:** filters the grid to *Keepers*, *AI picks*, *Duplicates*, *Rejected*, *Blurry*, *Motion blur* or *Out of focus*, and to one person after **Group by Person**
 
