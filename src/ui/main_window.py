@@ -685,6 +685,28 @@ class MainWindow(QMainWindow):
         self.toast.show_message(text)
         self.status_label.setText(text)
 
+    def delete_photos(self, keys, order=None) -> int:
+        """Delete Photo: confirm, then take ``keys`` out of the workspace and
+        move on to the next photo in ``order``. The files stay on disk
+        (INV-1); Restore Removed Images brings them back. Returns how many."""
+        from src.ui.dialogs.delete_photo_dialog import DeletePhotoDialog
+
+        active = set(self.session.keys())
+        keys = [k for k in dict.fromkeys(str(k) for k in keys) if k in active]
+        if not keys:
+            return 0
+        dialog = DeletePhotoDialog(keys, self.thumbnail_for, self)
+        if not dialog.exec():
+            return 0
+        deleted = self.session.delete_photos_from_workspace(keys, order)
+        if deleted:
+            name = Path(keys[0]).name if deleted == 1 else f"{deleted} photos"
+            self.log_action("cull", f"Deleted {name} from the workspace")
+            self.show_toast(f"Deleted {name} from the workspace. The file{'s are' if deleted != 1 else ' is'} "
+                            f"still on disk; View ▸ Restore Removed Images brings "
+                            f"{'them' if deleted != 1 else 'it'} back.")
+        return deleted
+
     def thumbnail_for(self, key: str):
         """The grid's thumbnail for a frame, for the filmstrips."""
         cell = self.cull.cells.get(key)

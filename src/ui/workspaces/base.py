@@ -54,6 +54,35 @@ class Workspace(QWidget):
     metadata = _shared("metadata")
     labels = _shared("labels")
 
+    # -- Delete Photo (Shift+Delete) -------------------------------------- #
+
+    def install_delete_photo(self, filmstrip=None) -> None:
+        """Shift+Delete (Shift+Backspace on a Mac) and the filmstrip's tile
+        menu delete a photo from the workspace (never from disk)."""
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtGui import QKeySequence, QShortcut
+
+        for keys in ("Shift+Delete", "Shift+Backspace"):
+            QShortcut(QKeySequence(keys), self, activated=self.delete_shown_photo,
+                      context=Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self._delete_strip = filmstrip
+        if filmstrip is not None:
+            filmstrip.delete_requested.connect(lambda key: self.delete_shown_photo(key))
+
+    def flush_edits(self) -> None:
+        """Save an edit still in progress before the photo goes."""
+
+    def delete_shown_photo(self, key=None) -> int:
+        """Delete ``key`` (the photo shown by default) from the workspace and
+        show the next one in the filmstrip."""
+        key = key or self.session.current
+        if key is None:
+            return 0
+        self.flush_edits()
+        strip = getattr(self, "_delete_strip", None)
+        order = strip.order() if strip is not None else None
+        return self.shell.delete_photos([key], order)
+
     # -- lifecycle --------------------------------------------------------- #
 
     def on_enter(self) -> None:

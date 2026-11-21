@@ -65,7 +65,7 @@ workspaces. In summary:
 | Graphics | None | Vector text, shapes, watermarks; SVG and PDF ([FR-17](#fr-17-design-and-vector-graphics)) |
 | Versions | None | Virtual copies with style branches, added in 2.00 ([FR-19](#fr-19-versions-virtual-copies)) |
 | De-blur | Unsharp mask only | Deconvolution of motion and focus blur, added in 2.00 ([FR-20](#fr-20-de-blur-deconvolution)) |
-| Tests | None | **770** pytest tests ([7](#7-quality-and-verification)) |
+| Tests | None | **799** pytest tests ([7](#7-quality-and-verification)) |
 
 ---
 
@@ -422,7 +422,8 @@ Measurements in 1.0 §FR-5 still hold.
 | FR-6.10 | Rejected photos are locked | `is_editable` is false for rejected and removed photos; `set_recipe`, `touch`, `apply_recipe` and `sync_settings` skip them with a warning; Enter or a double-click does not open them in Develop; the filmstrips hide them and Left / Right skip them; Develop, Retouch and Design disable and dim their controls behind a *Marked for Removal — Editing Disabled* banner with **↺ Restore Photo**. Duplicates, blinks and blurry photos the AI only flagged are not locked | **Done** (2.08) — `test_edit_lock.py` |
 | FR-6.2 | Reject, restore, review before acting | | **Done** |
 | FR-6.3 | Rejection is never deletion | | **Done** (INV-1) |
-| FR-6.5 | Remove Images | Shift+Delete or the toolbar: after one confirmation every rejected photo (manual, blur, blinks, duplicates, cull to target) leaves the working set, grid, filmstrips, counts and exports; files untouched; kept in the folder's session file and the project | **Done** — hash-checked in `test_invariants.py` |
+| FR-6.11 | Delete Photo | **Delete Photo from Workspace** (Shift+Delete / Shift+Backspace in Cull, Develop, Retouch and Design; a red item on the right-click menu of a grid tile and a filmstrip tile): `DeletePhotoDialog` shows the thumbnail, file name and size and says the file stays; `LibrarySession.delete_photos_from_workspace` takes the photo (or the selection) out of the working set like Remove Images and shows the next photo in the grid's or filmstrip's order (the previous at the end). **The file is never deleted, moved or changed (INV-1)**; ratings, edits and virtual copies are kept and Restore Removed Images brings it back. The spec asked for the Recycle Bin or permanent deletion; the owner chose removal from the workspace only | **Done** (2.09) — `test_delete_photo.py` |
+| FR-6.5 | Remove Images | Ctrl+Shift+Delete (Shift+Delete until 2.08) or the toolbar: after one confirmation every rejected photo (manual, blur, blinks, duplicates, cull to target) leaves the working set, grid, filmstrips, counts and exports; files untouched; kept in the folder's session file and the project | **Done** — hash-checked in `test_invariants.py` |
 | FR-6.6 | Restore Removed Images | View menu: every removed photo listed with a tick; restored photos return in folder order with ratings, labels, versions and edits, still rejected | **Done** |
 | FR-6.4 | Filter the grid | Keepers, AI picks, duplicates, rejected, blurry, motion, out of focus; and by person | **Done** |
 | FR-6.7 | Smart Priority sort | *Sort* menu: 1 picks, rated and AI-starred (picks first, then 5 stars down to 1), 2 unrated keepers, 3 duplicates, 4 blinks, 5 blurry, 6 rejected for no other reason; a rejected photo never ranks as a keeper; stable within a rank; a full-width *Culled & Flagged for Removal (X items)* divider before rank 3; copies stay with their parent; arrow keys follow the order; *Capture Order* by default | **Done** (2.05) — `test_virtual_copies.py` |
@@ -715,7 +716,9 @@ All of this writes only the project file, the recent list and the app's own `-ed
 | --- | --- | --- |
 | NFR-1.1 | Cull 1,000 RAW files fast | **Met for the 1.0 target of 5 minutes on all nine cameras tested. The 2.0 target of 90 seconds is met on five of nine.** |
 | NFR-1.2 | Grid and filmstrip smooth on integrated graphics | **Done** |
-| NFR-1.3 | Simple develop edits feel immediate | **Done** — 13–16 ms per preview at 1600 px |
+| NFR-1.3 | Simple develop edits feel immediate | **Done** — exposure, contrast, curves, whites and blacks 13–16 ms per preview at 1600 px; 12 ms on the 1,200 px proxy (asserted < 25 ms) |
+| NFR-1.5 | Slower edits follow the slider | **Done** (2.09) — two tiers: while a control moves, Develop renders a draft sized (400–1,200 px, in 80 px steps) to take about 50 ms, then the full 1600 px preview 120 ms after the last movement; `LatestOnlyRenderer.show_progress` shows every finished draft newer than the one on screen instead of dropping it, so a slider that never pauses still moves the picture (1 frame in a 1.7 s drag before, 22 after). Preview-sized frames render their strips on up to 4 threads (within one level of the serial render); vibrance and saturation 2–3× faster, bit-identical. A 24 MP frame with highlights, shadows, clarity and colour: 390 ms full, about 45 ms as a 400 px draft. Not reached: the spec's 16 ms for every setting — the local-contrast settings spend about 80 ms building their blur maps whatever the size |
+| NFR-1.6 | Thumbnails stream in | **Done** (2.09) — `UniversalLoader.iter_thumbnails`: a thread pool fed 20 files at a time, each tile sent as it finishes; ten RAW thumbnails in about 100 ms (asserted < 200 ms), 100 in 0.7 s against 2.2 s serially; embedded JPEG only, never `postprocess()` (asserted on ten cameras), `half_size` decoding when there is no preview |
 | NFR-1.4 | Analysis independent of source resolution | **Done** |
 
 **NFR-1.1 measurements** (`tests/bench_cull.py`; i5-8350U, 4 cores / 8
@@ -764,6 +767,12 @@ last**; a provider that fails to start falls back to the CPU.
 **first** DirectML session on a machine took **76 s** (driver shader
 compilation); later ones 0.6 s. Switching runtimes changed nothing on the CPU
 path (pixel-identical cut-out).
+
+**Measured again in 2.09** (`tests/profile_performance.py ai`, same machine):
+U2Net background removal 437 ms on DirectML against 735 ms on the CPU. The
+small models were also run on ONNX Runtime for comparison: YuNet 31 vs 9 ms,
+SFace 23 vs 20 ms, PP-HumanSeg 10 vs 9 ms (DirectML vs CPU) — so running them
+on the CPU, as the app does, is the faster choice on integrated graphics.
 
 **Scope:** only ONNX Runtime models (today, background removal). Face, pose,
 mesh, recognition, segmentation and inpainting run through OpenCV's engine on
@@ -919,7 +928,7 @@ verified whole and unpacked in memory, so no unverified file reaches disk.
 
 ### 7.1 Approach
 
-**770 pytest tests** (769 pass and 1 skips on the development machine, where
+**799 pytest tests** (798 pass and 1 skips on the development machine, where
 the hosted backend's own requirements are not installed). They exercise the
 real engines and the real window — headless, with `QT_QPA_PLATFORM=offscreen`
 — and mock nothing but file dialogs and, in two tests, the network.
@@ -947,6 +956,8 @@ repository, which may sit on a synced drive.
 | `test_smart_brush.py` | 17 | Edge containment, erase, sensitivity on a faint edge, snapping off, a brush on the edge, drags without gaps, speed, the preview; the mask saved and exported (colour only where painted, originals untouched); the Retouch tool, size keys, invert, reset, erase, the lock; partial repaint |
 | `test_multi_export.py` | 29 | Person query (ANY, ALL, SOLO, ALL_PROJECT, string ids, order, removed and rejected photos, the saved manifest), bundle names, folders, presets and saving, two bundles in their own folders, a shared photo rendered once, unreadable photos, the photo folder refused, Instagram 4:5 size, originals hashed untouched, the queue builder (counts, picker, run, reload) |
 | `test_audit_log.py` | 13 | Audit log and stages, persistence, damaged logs, the checklist, the window's logging, adoption by a new project, the History drawer; edit history labels, storage, restore-to-step, copies, the Develop panel |
+| `test_delete_photo.py` | 12 | Delete Photo: the file untouched (hashed) and restored with its rating, edit and copy; other photos' marks, recipes and edit files byte-identical; the next photo shown (grid order, the end, several at once); the dialog; Cancel; Shift+Delete and the red menu item in Cull; Develop saves an edit in progress first; the filmstrip menu in Develop, Retouch and Design |
+| `test_performance.py` | 17 | Ten RAW thumbnails < 200 ms; no `postprocess()` for thumbnails; the pool's chunks, single delivery and cancel; the grid fills; a slider on the 1,200 px proxy < 25 ms; saturation bit-identical to 2.08 (six settings); parallel strips within one level; Develop's draft then full preview; fast previews skip the draft; overtaken renders shown only when asked and never across a cancel; the brush repaints only under the cursor |
 | `test_purge.py` | 12 | Remove Images: files untouched, set and exports updated, restore with marks and edits, persistence, Cull button, shortcut, restore dialog, filmstrips |
 | `test_color_splash.py` | 11 | One-click layer, recipe round trip, object kept and rest grey at equal brightness, off / inverted / partial, the selection cached, model absent, luminance-preserving saturation, the Retouch tool, export |
 | `test_layer_stack.py` | 47 | Blend-mode values, masks, compositing, pixel layers, through the pipeline |

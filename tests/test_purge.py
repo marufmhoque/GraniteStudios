@@ -156,13 +156,16 @@ def test_nothing_rejected_says_so_and_cancel_changes_nothing(harness, monkeypatc
     assert cull.remove_images() == 0 and not w.session.purged
 
 
-def test_shift_delete_is_the_shortcut(harness, monkeypatch):
-    from PyQt6.QtGui import QKeySequence, QShortcut
+def test_ctrl_shift_delete_is_the_shortcut(harness, monkeypatch):
+    """Remove Images moved to Ctrl+Shift+Delete in 2.09; Shift+Delete now
+    deletes just the selected photo (see test_delete_photo.py)."""
+    from PyQt6.QtGui import QShortcut
 
     cull = harness.window.cull
-    keys = {s.key().toString() for s in cull.findChildren(QShortcut)}
-    assert {"Shift+Del", "Shift+Backspace"} <= keys
+    slots = {s.key().toString(): s for s in cull.findChildren(QShortcut)}
+    assert {"Ctrl+Shift+Del", "Ctrl+Shift+Backspace"} <= set(slots)
     assert "Remove Images" in cull.remove_button.text()
+    assert "Ctrl+Shift+Delete" in cull.remove_button.toolTip()
 
 
 def test_restore_dialog_brings_chosen_photos_back(harness, monkeypatch):

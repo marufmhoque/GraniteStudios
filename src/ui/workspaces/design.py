@@ -159,6 +159,7 @@ class DesignWorkspace(Workspace):
         self.canvas.released.connect(self._on_release)
         centre.addWidget(self.canvas, stretch=1)
         self.filmstrip = Filmstrip(self.session, self.shell.thumbnail_for)
+        self.install_delete_photo(self.filmstrip)
         centre.addWidget(self.filmstrip)
         outer.addLayout(centre, stretch=1)
 

@@ -184,6 +184,7 @@ class RetouchWorkspace(Workspace):
         self.canvas.set_overlay(self._paint_overlay)
         centre.addWidget(self.canvas, stretch=1)
         self.filmstrip = Filmstrip(self.session, self.shell.thumbnail_for)
+        self.install_delete_photo(self.filmstrip)
         centre.addWidget(self.filmstrip)
         outer.addLayout(centre, stretch=1)
 

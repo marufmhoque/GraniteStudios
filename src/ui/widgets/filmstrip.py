@@ -1,7 +1,8 @@
 """A strip of the working set along the bottom of an editing workspace.
 
 Shows the frames that can be edited, in order, each followed by its virtual
-copies (with a small ``v2`` chip), outlines the one being edited, and moves to a tile when it is clicked. It borrows the
+copies (with a small ``v2`` chip), outlines the one being edited, and moves to a tile when it is clicked. A tile's right-click menu
+deletes the photo from the workspace (``delete_requested``). It borrows the
 thumbnails the Cull grid has already decoded, so it costs nothing to keep up
 to date.
 
@@ -13,14 +14,16 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PyQt6.QtCore import QSize, Qt
-from PyQt6.QtWidgets import QHBoxLayout, QLabel, QScrollArea, QWidget
+from PyQt6.QtCore import QSize, Qt, pyqtSignal
+from PyQt6.QtWidgets import QHBoxLayout, QLabel, QMenu, QScrollArea, QWidget
 
 STRIP_THUMB = 84
 MASTER = 0
 
 
 class Filmstrip(QScrollArea):
+    delete_requested = pyqtSignal(str)        # Delete Photo chosen on a tile's menu
+
     def __init__(self, session, thumbnails, parent=None) -> None:
         """``thumbnails(key)`` returns a QPixmap for a frame, or None."""
         super().__init__(parent)
@@ -47,6 +50,21 @@ class Filmstrip(QScrollArea):
         if self.session.version_count(entry.key) > 1:
             self.session.set_active_version(entry.key, entry.version)
 
+    def tile_menu(self, entry):
+        """A tile's right-click menu: Delete Photo from Workspace."""
+        from src.ui.dialogs.delete_photo_dialog import add_delete_action
+
+        menu = QMenu(self)
+        add_delete_action(menu, lambda: self.delete_requested.emit(entry.key))
+        return menu
+
+    def _menu(self, entry, where) -> None:
+        self.tile_menu(entry).exec(where)
+
+    def order(self) -> list[str]:
+        """The photos in the strip, in its order (each once)."""
+        return list(dict.fromkeys(e.key for e in self.entries()))
+
     def entries(self) -> list:
         """The tiles to show: every entry, less the locked ones by default."""
         entries = self.session.entries()
@@ -70,6 +88,7 @@ class Filmstrip(QScrollArea):
                             else f"{entry.variant_key} — virtual copy ({entry.name})")
             tile.setCursor(Qt.CursorShape.PointingHandCursor)
             tile.mousePressEvent = lambda _event, e=entry: self._choose(e)
+            tile.contextMenuEvent = lambda event, e=entry: self._menu(e, event.globalPos())
             if entry.is_copy:
                 chip = QLabel(entry.chip, tile)
                 chip.setGeometry(STRIP_THUMB - 30, 4, 26, 16)

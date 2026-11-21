@@ -263,6 +263,43 @@ class LibrarySession:
         self.notify(MARKS)
         return len(targets)
 
+    def delete_photos_from_workspace(self, paths, order=None) -> int:
+        """Delete photos from the workspace: Delete Photo (Shift+Delete).
+
+        The photos leave the project as Remove Images takes rejected ones
+        (see :meth:`purge`). The files are never deleted, moved or changed
+        on disk (INV-1), and their ratings and edits are kept, so View ▸
+        Restore Removed Images brings them back as they were. When the photo
+        being looked at goes, the next one in ``order`` (the grid's order;
+        folder order by default) becomes current, or the one before it at
+        the end. Returns how many were deleted.
+        """
+        active = set(self.keys())
+        targets = [key for key in dict.fromkeys(str(p) for p in paths) if key in active]
+        if not targets:
+            return 0
+        following = None
+        if self.current in targets:
+            following = self.neighbour_after(targets, order)
+        removed = self.purge(targets)
+        if following is not None:
+            self.set_current(following)
+        return removed
+
+    def neighbour_after(self, keys, order=None) -> str | None:
+        """The photo to show once ``keys`` are gone: the first one after the
+        last of them in ``order``, else the last one before the first."""
+        gone = {str(k) for k in keys}
+        active = set(self.keys())
+        order = [str(k) for k in (order if order is not None else self.keys()) if str(k) in active]
+        places = [i for i, key in enumerate(order) if key in gone]
+        if not places:
+            return next((key for key in order if key not in gone), None)
+        after = next((key for key in order[places[-1] + 1:] if key not in gone), None)
+        if after is not None:
+            return after
+        return next((key for key in reversed(order[:places[0]]) if key not in gone), None)
+
     def restore_purged_images(self, paths=None) -> int:
         """Put removed photos back (all of them, or ``paths``). Returns how
         many. They come back as they were: still rejected, with their

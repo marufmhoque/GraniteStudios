@@ -48,6 +48,7 @@ import dataclasses
 import hashlib
 import logging
 import math
+import os
 import threading
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -301,7 +302,9 @@ def _apply_lut(values: np.ndarray, lut: np.ndarray) -> np.ndarray:
     The working tables have 65,536 entries, so the nearest entry is within
     a hundredth of an 8-bit step and no interpolation is needed.
     """
-    index = np.clip(values, 0.0, 1.0) * (len(lut) - 1) + 0.5
+    index = np.clip(values, 0.0, 1.0)          # a new array, so the rest is in place
+    index *= len(lut) - 1
+    index += 0.5
     return lut[index.astype(np.int32)]
 
 
@@ -716,20 +719,32 @@ def _saturate(encoded: np.ndarray, vibrance: float, saturation: float) -> np.nda
     Vibrance scales by how muted a pixel is, so skin and pastels move more
     than colours that are already vivid.
     """
-    luma = np.clip(encoded @ LUMA, 0.0, 1.0)[:, :, None]
-    chroma = encoded - luma
+    # Worked on whole channel planes: reducing over a 3-wide last axis is
+    # several times slower in NumPy (2.09 made this step ~4x faster).
+    encoded = np.asarray(encoded, np.float32)
+    r, g, b = encoded[:, :, 0], encoded[:, :, 1], encoded[:, :, 2]
+    luma = np.clip(r * LUMA[0] + g * LUMA[1] + b * LUMA[2], 0.0, 1.0)
+    high = np.maximum(np.maximum(r, g), b)
+    low = np.minimum(np.minimum(r, g), b)
     factor = np.float32(1.0 + saturation / 100.0)
     if vibrance:
-        high = encoded.max(axis=2)
-        low = encoded.min(axis=2)
         muted = 1.0 - np.clip((high - low) / np.maximum(high, 1e-6), 0.0, 1.0)
-        factor = factor * (1.0 + (vibrance / 100.0) * muted)[:, :, None]
+        factor = factor * (1.0 + np.float32(vibrance / 100.0) * muted)
     factor = np.broadcast_to(np.asarray(factor, np.float32), luma.shape)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        room = np.where(chroma > 1e-6, (1.0 - luma) / chroma,
-                        np.where(chroma < -1e-6, luma / -chroma, np.inf)).min(axis=2, keepdims=True)
-    factor = np.where(factor > 1.0, np.minimum(factor, np.maximum(room, 1.0)), np.maximum(factor, 0.0))
-    return (luma + chroma * factor).astype(np.float32)
+    if np.any(factor > 1.0):
+        # How far each pixel can move from its grey before a channel leaves
+        # 0..1: the channel furthest above the grey limits the way up, the
+        # one furthest below limits the way down.
+        up, down = high - luma, luma - low
+        with np.errstate(divide="ignore", invalid="ignore"):
+            room = np.minimum(np.where(up > 1e-6, (1.0 - luma) / up, np.inf),
+                              np.where(down > 1e-6, luma / down, np.inf))
+        factor = np.where(factor > 1.0, np.minimum(factor, np.maximum(room, 1.0)), np.maximum(factor, 0.0))
+    else:
+        factor = np.maximum(factor, 0.0)
+    factor = factor[:, :, None]
+    luma = luma[:, :, None]
+    return (luma + (encoded - luma) * factor).astype(np.float32, copy=False)
 
 
 def _colour_stage(encoded: np.ndarray, recipe: Recipe, ctx: Context) -> np.ndarray:
@@ -1166,10 +1181,47 @@ def _render_pixels(source: Source, recipe: Recipe, bits: int, segmenter=None) ->
         return np.stack([tables[c][source.data[:, :, c]] for c in range(3)], axis=-1)
 
     out = np.empty((height, width, 3), dtype=np.uint16 if bits == 16 else np.uint8)
-    for y0 in range(0, height, STRIP_ROWS):
-        rows = slice(y0, min(height, y0 + STRIP_ROWS))
+    pool = _strip_pool() if width * height <= PARALLEL_MAX_PIXELS else None
+    if pool is None:
+        for y0 in range(0, height, STRIP_ROWS):
+            rows = slice(y0, min(height, y0 + STRIP_ROWS))
+            out[rows] = _quantise(_render_rows(source, recipe, ctx, rows), bits)
+        return out
+
+    # A preview-sized frame: its strips render side by side (NumPy and
+    # OpenCV release the GIL). Each strip carries its own padding, so the
+    # result matches the one-strip-at-a-time render to within one level.
+    step = max(PARALLEL_MIN_ROWS, -(-height // _STRIP_WORKERS))
+
+    def strip(y0: int) -> None:
+        rows = slice(y0, min(height, y0 + step))
         out[rows] = _quantise(_render_rows(source, recipe, ctx, rows), bits)
+
+    for future in [pool.submit(strip, y0) for y0 in range(0, height, step)]:
+        future.result()
     return out
+
+
+# Previews (up to this many pixels) render their strips in parallel. Full-size
+# exports keep one strip at a time: their memory is budgeted per export
+# worker (see hardware.get_safe_export_ram_gb).
+PARALLEL_MAX_PIXELS = 4_000_000
+PARALLEL_MIN_ROWS = 96
+_STRIP_WORKERS = max(1, min(4, (os.cpu_count() or 2) - 1))
+_STRIP_POOL = None
+_STRIP_LOCK = threading.Lock()
+
+
+def _strip_pool():
+    global _STRIP_POOL
+    if _STRIP_WORKERS < 2:
+        return None
+    with _STRIP_LOCK:
+        if _STRIP_POOL is None:
+            from concurrent.futures import ThreadPoolExecutor
+
+            _STRIP_POOL = ThreadPoolExecutor(max_workers=_STRIP_WORKERS, thread_name_prefix="render-strip")
+        return _STRIP_POOL
 
 
 def render_preview(source: Source, recipe: Recipe, max_side: int = 1600, layers=None) -> np.ndarray:

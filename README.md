@@ -1,6 +1,6 @@
 # Granite Studios
 
-**Current version: v2.08**
+**Current version: v2.09**
 
 ### [⬇️ Download the installer](https://github.com/marufmhoque/GraniteStudios/releases/latest/download/Install-GraniteStudios.bat)
 
@@ -80,7 +80,7 @@ Six workspaces over one folder: **Cull**, **Develop**, **Retouch**, **Design**, 
 - Straightening: under **1 degree** residual from scene lines, **0.6 degree** mean from the body when there are no lines
 - Background removal **1.36 times faster** on DirectML than CPU
 - De-blurring recovers **+5.2 dB** on a synthetic 10 px motion smear; a full-quality pass takes about **4 s** on the 1,600 px preview and **66 s** on a 24 MP export (a fast Wiener pass follows the slider in about 150 ms)
-- **770 automated tests** against real engines, 20,300 lines of application code and 5,600 lines of tests
+- **799 automated tests** against real engines, 20,300 lines of application code and 5,600 lines of tests
 
 **What it cannot do yet** (full list with reasons in [PRD.md](PRD.md) section 8):
 
@@ -96,8 +96,8 @@ Six workspaces over one folder: **Cull**, **Develop**, **Retouch**, **Design**, 
 | Where | Keys |
 | --- | --- |
 | Anywhere | **Ctrl+1 to Ctrl+6** switch workspace; **Ctrl+N** new project; **Ctrl+O** open project; **Ctrl+S** save project |
-| Cull | Arrows move; **1-5** stars (0 clears); **6-9** red, yellow, green, blue; **P** pick; **X** reject; **U** clear; **S** survey; **F** face loupe; **Ctrl+A** select all; **Ctrl+D** select none; **Ctrl+'** duplicate as a virtual copy; **Shift+Delete** remove rejected images; **Enter** open in Develop |
-| Develop | Left/Right change frame; **[ / ]** change version; **V** compare versions (**Shift+V** picks which); **\\** before/after; **J** clipping; **Ctrl+Z / Ctrl+Y** undo, redo; **Ctrl+'** new virtual copy; **Ctrl+Shift+C / V** copy, paste settings; **0** fit; **1** 100% |
+| Cull | Arrows move; **1-5** stars (0 clears); **6-9** red, yellow, green, blue; **P** pick; **X** reject; **U** clear; **S** survey; **F** face loupe; **Ctrl+A** select all; **Ctrl+D** select none; **Ctrl+'** duplicate as a virtual copy; **Shift+Delete** delete the photo (or the selection) from the workspace; **Ctrl+Shift+Delete** remove every rejected image; **Enter** open in Develop |
+| Develop | Left/Right change frame; **[ / ]** change version; **V** compare versions (**Shift+V** picks which); **\\** before/after; **J** clipping; **Ctrl+Z / Ctrl+Y** undo, redo; **Ctrl+'** new virtual copy; **Ctrl+Shift+C / V** copy, paste settings; **Shift+Delete** delete the photo from the workspace; **0** fit; **1** 100% |
 
 **Where to go next:** [Quick Start](#quick-start) to install, [Features](#features) for every control, [Architecture Highlights](#architecture-highlights) for how edits are stored, and [PRD.md](PRD.md) for every requirement with its evidence.
 
@@ -253,7 +253,8 @@ filmstrip along the bottom.
 - **Rejected never means deleted.** The original file is never moved, renamed or removed; it is simply left out of every export
 - **Review Rejected** shows every rejected frame before anything is acted on, with a tick per photo to put it back
 - **Sort: Smart Priority (Keepers First)** puts picks first, then 5-star down to 1-star and AI-starred photos, then unrated keepers. Below a **🔻 Culled & Flagged for Removal (X items)** divider come duplicates, blinks, blurry frames and the rejected, in that order, so you can see exactly what Remove Images will take. A rejected photo never counts as a keeper, whatever its stars. *Capture Order* is the folder's order
-- **Remove Images** (Shift+Delete) clears every rejected photo out of the project after one confirmation: it leaves the grid, the filmstrips, every count and every export, and the status bar says how many keepers remain. The files stay on disk exactly as they were. **View ▸ Restore Removed Images** lists them with a tick each and brings them back with their ratings and edits
+- **🗑️ Delete Photo from Workspace…** (Shift+Delete, Shift+Backspace on a Mac, or in red on a tile's right-click menu in the grid and the filmstrips) takes one photo, or the selected ones, out of the project after a confirmation that shows the thumbnail, file name and size. The next photo is shown. As with culled and blurry photos, **the file is never deleted**: it stays on disk with its ratings, edits and virtual copies, and View ▸ Restore Removed Images brings it back
+- **Remove Images** (Ctrl+Shift+Delete) clears every rejected photo out of the project after one confirmation: it leaves the grid, the filmstrips, every count and every export, and the status bar says how many keepers remain. The files stay on disk exactly as they were. **View ▸ Restore Removed Images** lists them with a tick each and brings them back with their ratings and edits
 
 ### Projects
 - **File ▸ New Project** (Ctrl+N) names a shoot, points it at its folder and saves a small `<Name>.granite` file, by default in *Documents/Granite Studios/Projects*. It only points at the photos; nothing is written beside them
@@ -431,7 +432,7 @@ python tests/fetch_media.py   # optional: CC0 camera RAW samples and reference f
 pytest
 ```
 
-**770 tests.** They drive the real engines and the real window (headless,
+**799 tests.** They drive the real engines and the real window (headless,
 with `QT_QPA_PLATFORM=offscreen`); nothing is mocked except file dialogs.
 Tests that need a downloaded model or sample file are marked `model` or
 `media` and skip themselves when it is absent.
@@ -534,7 +535,12 @@ See [README_INSTALL.md](README_INSTALL.md) for Windows SmartScreen and macOS Gat
 ### Performance Tips
 - Preview caching is LRU-bounded (256 images in RAM by default) — scroll smoothly even on integrated graphics
 - Culling reads the camera's embedded JPEG from each RAW instead of developing it, and uses every core
-- The Develop preview renders from a 1600 px proxy with exactly the export's pipeline; simple slider moves take about 15 ms on an i5-8350U
+- The grid's thumbnails decode on a thread pool, 20 files at a time, and appear as each one finishes: 100 RAW thumbnails in 0.7 s instead of 2.2 s one at a time (i5-8350U)
+- Thumbnails come from the camera's embedded JPEG; a RAW with none is decoded at half size (2×2 binning, no demosaic), never fully developed
+- The Develop preview renders from a 1600 px proxy with exactly the export's pipeline. Exposure, contrast, curves, whites and blacks take about 14 ms (70 fps) on an i5-8350U. Slower settings (highlights, shadows, clarity, colour) show a smaller draft while the slider moves, sized to render in about 50 ms, and the full preview 120 ms after it stops; every finished draft is shown, so the picture keeps moving with the hand
+- A preview's strips render on several cores at once, and the vibrance and saturation step is 2–3× faster with identical output (2.09)
+- The brush repaints only the rectangle under the cursor
+- `python tests/profile_performance.py` prints all of these timings for your machine, and DirectML against the CPU for the AI models
 - Two cameras in the test set (an iPhone XS DNG and a Hasselblad H3D) carry no usable embedded preview, so they are developed at half size and cull several times slower
 
 ## Roadmap

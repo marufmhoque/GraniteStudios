@@ -77,18 +77,23 @@ class ThumbnailWorker(QThread):
         self._cancelled = True
 
     def run(self) -> None:
+        # Decoded on a thread pool 20 at a time (UniversalLoader.iter_thumbnails)
+        # and streamed to the grid as each one finishes; the pixmaps are made
+        # here, one at a time, as before.
         total = len(self.paths)
-        for i, path in enumerate(self.paths, start=1):
+        done = 0
+        for path, thumb, meta in self.loader.iter_thumbnails(
+                self.paths, size=THUMB_SIZE * 2, metadata=True, cancelled=lambda: self._cancelled):
             if self._cancelled:
                 break
-            thumb = self.loader.load_thumbnail(path, size=THUMB_SIZE * 2)
-            if thumb is not None and not self._cancelled:
+            if thumb is not None:
                 thumb.thumbnail((THUMB_SIZE, THUMB_SIZE), Image.Resampling.LANCZOS)
                 self.thumb_ready.emit(str(path), pil_to_pixmap(thumb))
-            if not self._cancelled:
+            if meta is not None:
                 # EXIF gear/exposure info for the Tech Info overlay.
-                self.meta_ready.emit(str(path), self.loader.read_metadata(path))
-            self.progress.emit(i, total)
+                self.meta_ready.emit(str(path), meta)
+            done += 1
+            self.progress.emit(done, total)
         self.finished_all.emit()
 
 

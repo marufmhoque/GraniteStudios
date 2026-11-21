@@ -36,7 +36,7 @@ from pathlib import Path
 import numpy as np
 from datetime import datetime
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QCheckBox, QComboBox, QFileDialog, QGridLayout, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
@@ -59,6 +59,14 @@ from src.ui.workspaces.base import Workspace
 logger = logging.getLogger(__name__)
 
 PREVIEW_SIDE = 1600
+# Two-tier preview. While a control is moving, a smaller draft is rendered
+# (sized so it takes about DRAFT_BUDGET_MS); once it has rested for
+# SETTLE_MS the full 1600 px preview follows. Drafts are only used when
+# the full preview is slower than the budget.
+DRAFT_BUDGET_MS = 50.0
+DRAFT_MAX_SIDE = 1200
+DRAFT_MIN_SIDE = 400
+SETTLE_MS = 120
 HISTORY_LIMIT = 100
 
 # (attribute, label, low, high, step, decimals)
@@ -114,6 +122,13 @@ class DevelopWorkspace(Workspace):
         self._loading = False
         self.renderer = LatestOnlyRenderer(self)
         self.renderer.ready.connect(self._on_rendered)
+        self._render_ms: float | None = None     # the last full preview's render time
+        self._draft_side = DRAFT_MAX_SIDE        # adapted so a draft stays near the budget
+        self._drafts: dict[int, dp.Source] = {}  # draft proxies of the current source, by size
+        self._settle = QTimer(self, singleShot=True, interval=SETTLE_MS)
+        self._settle.timeout.connect(self._render)
+        self.renderer.hold = self._settle.isActive
+        self.renderer.show_progress = True       # the picture follows a slider that never pauses
         self.renderer.failed.connect(lambda message: self.status_label.setText(f"Preview failed: {message}"))
         self.loader_job = LatestOnlyRenderer(self)
         self.loader_job.ready.connect(self._on_source_loaded)
@@ -176,6 +191,7 @@ class DevelopWorkspace(Workspace):
         self.sibling_canvas.setVisible(False)
         centre.addLayout(views, stretch=1)
         self.filmstrip = Filmstrip(self.session, self.shell.thumbnail_for)
+        self.install_delete_photo(self.filmstrip)
         centre.addWidget(self.filmstrip)
         outer.addLayout(centre, stretch=1)
 
@@ -529,6 +545,7 @@ class DevelopWorkspace(Workspace):
             self.canvas.caption = "This file could not be read."
             return
         self.source = source
+        self._drafts.clear()
         self.lens_status.setText(
             "A profile for this camera and lens was found." if dp.lens_profile_available(key)
             else "No profile for this camera and lens; use the sliders."
@@ -552,9 +569,37 @@ class DevelopWorkspace(Workspace):
             )
         return self._layer_context
 
+    def _wants_draft(self) -> bool:
+        return (self.source is not None and self._render_ms is not None
+                and self._render_ms > DRAFT_BUDGET_MS * 1.5
+                and max(self.source.data.shape[:2]) > DRAFT_MIN_SIDE)
+
+    def _draft_source(self) -> dp.Source:
+        side = min(self._draft_side, max(self.source.data.shape[:2]))
+        if side not in self._drafts:
+            self._drafts.clear()
+            self._drafts[side] = self.source.proxy(side)
+        return self._drafts[side]
+
+    def _render_draft(self) -> None:
+        """The quick tier: the recipe on a smaller proxy, the picture only."""
+        source, recipe, context = self._draft_source(), self.recipe.copy(), self._context()
+        if self._dragging_deblur and recipe.deblur.enabled and recipe.deblur.engine == "parametric":
+            recipe.deblur.engine = "wiener_fast"
+
+        def job():
+            import time
+
+            started = time.perf_counter()
+            image = dp.render(source, recipe, layers=context)
+            return ("draft", image, (time.perf_counter() - started) * 1000.0)
+
+        self.renderer.request(job)
+
     def _render(self) -> None:
         if self.source is None:
             return
+        self._settle.stop()                 # a full render supersedes a pending one
         source, recipe, context = self.source, self.recipe.copy(), self._context()
         if self._dragging_deblur and recipe.deblur.enabled and recipe.deblur.engine == "parametric":
             # Richardson-Lucy takes seconds; the closed-form Wiener filter
@@ -572,28 +617,46 @@ class DevelopWorkspace(Workspace):
                 sibling_context = self._context(sibling)
 
         def job():
+            import time
+
+            started = time.perf_counter()
             after = dp.render(source, recipe, layers=context)
+            elapsed = (time.perf_counter() - started) * 1000.0
             before = None
             if want_before:
                 neutral = pr.Recipe()
                 neutral.geometry = recipe.geometry
                 before = dp.render(source, neutral)
             other = dp.render(source, sibling, layers=sibling_context) if sibling is not None else None
-            return after, before, geometry_key, other, sibling_key
+            return after, before, geometry_key, other, sibling_key, elapsed
 
         self.renderer.request(job)
 
-    def _on_rendered(self, result) -> None:
-        after, before, geometry_key, other, sibling_key = result
-        if other is not None:
-            self.sibling_canvas.set_image(other)
-            self._sibling_key = sibling_key
+    def _show_render(self, after) -> None:
         self._last_render = after
         self.histogram.set_image(after)
         self.curve.set_histogram(self.histogram.luminance_counts())
         shadows, highlights = self.histogram.shadows_clipped, self.histogram.highlights_clipped
         self.clip_readout.setText(f"Clipped: {shadows * 100:.2f}% shadows · {highlights * 100:.2f}% highlights")
         self.canvas.set_image(clipping_overlay(after) if self._show_clipping else after)
+
+    def _on_rendered(self, result) -> None:
+        if isinstance(result[0], str):     # ("draft", image, ms); a full render starts with an array
+            _tag, image, elapsed = result
+            # Keep the draft near the budget: shrink it when it ran long,
+            # grow it back when there was time to spare.
+            scale = min(1.25, max(0.6, (DRAFT_BUDGET_MS / max(elapsed, 1.0)) ** 0.5))
+            # In steps of 80 px, so the draft proxy is reused rather than remade each frame.
+            side = int(round(self._draft_side * scale / 80.0)) * 80
+            self._draft_side = min(DRAFT_MAX_SIDE, max(DRAFT_MIN_SIDE, side))
+            self._show_render(image)
+            return
+        after, before, geometry_key, other, sibling_key, elapsed = result
+        self._render_ms = elapsed
+        if other is not None:
+            self.sibling_canvas.set_image(other)
+            self._sibling_key = sibling_key
+        self._show_render(after)
         if before is not None:
             self.canvas.set_before(before)
             self._before_key = geometry_key
@@ -655,8 +718,19 @@ class DevelopWorkspace(Workspace):
             row.set_value(float(getattr(wheel, attr)))
 
     def _changed(self) -> None:
-        """A setting moved: show it now; it is committed on release."""
-        self._render()
+        """A setting moved: show it now; it is committed on release.
+
+        When the full preview is slow, a quick draft follows the hand and
+        the full preview comes SETTLE_MS after the last movement (so on
+        release, or when the slider rests)."""
+        if self._wants_draft():
+            self._render_draft()
+            self._settle.start()
+        else:
+            self._render()
+
+    def flush_edits(self) -> None:
+        self._commit()
 
     def _commit(self) -> None:
         """A change is finished: record it for undo and hand it to the session."""

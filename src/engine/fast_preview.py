@@ -412,6 +412,9 @@ def _locate_raw(path: Path, min_side: int) -> _Source | None:
         # No usable preview: develop the sensor data at half size. LibRaw
         # applies the orientation itself on this path.
         try:
+            # half_size bins each 2x2 block, so no demosaic runs at all.
+            # (user_qual=0 was tried in 2.09: it gained nothing on this path and
+            # LibRaw then failed on the iPhone XS DNG and the Hasselblad 3FR.)
             rgb = raw.postprocess(half_size=True, use_camera_wb=True, output_bps=8)
         except Exception as exc:
             logger.debug("Half-size demosaic failed for %s: %s", path.name, exc)

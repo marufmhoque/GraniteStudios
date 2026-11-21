@@ -32,6 +32,8 @@ pillow_heif.register_heif_opener()
 
 from src.engine import fast_preview  # noqa: E402
 
+THUMB_CHUNK = 20      # thumbnails handed to the thread pool at a time
+
 logger = logging.getLogger(__name__)
 
 RAW_EXTENSIONS = fast_preview.RAW_EXTENSIONS
@@ -265,6 +267,38 @@ class UniversalLoader:
         """
         preview = fast_preview.load_preview(path, max_side=size, min_side=0)
         return preview.to_pil() if preview is not None else None
+
+    def iter_thumbnails(self, paths, size: int = 320, chunk: int = THUMB_CHUNK,
+                        workers: int | None = None, metadata: bool = False, cancelled=None):
+        """Decode grid thumbnails in parallel and yield them as they finish.
+
+        The files go to a thread pool ``chunk`` at a time (20 by default), so
+        a folder of thousands never queues thousands of decodes and the first
+        tiles appear while the rest are still loading. Each item is
+        ``(path, thumbnail or None, metadata or None)``; within a chunk they
+        come in the order they finish. ``cancelled()`` returning True stops
+        it between chunks. Decoding releases the GIL, so threads scale.
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        paths = [Path(p) for p in paths]
+        workers = workers or fast_preview.default_workers()
+
+        def one(path: Path):
+            thumb = self.load_thumbnail(path, size=size)
+            meta = self.read_metadata(path) if metadata else None
+            return path, thumb, meta
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for start in range(0, len(paths), max(1, chunk)):
+                if cancelled is not None and cancelled():
+                    return
+                futures = [pool.submit(one, path) for path in paths[start:start + chunk]]
+                for future in as_completed(futures):
+                    try:
+                        yield future.result()
+                    except Exception:
+                        logger.exception("Thumbnail failed")
 
     def load_analysis(self, path: str | Path, max_side: int = 1600) -> np.ndarray | None:
         """An upright RGB array sized for analysis rather than display."""

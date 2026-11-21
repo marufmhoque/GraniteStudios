@@ -83,6 +83,7 @@ from src.video import spatial as video_spatial
 from src.video import timing as video_timing
 from src.video.ffmpeg_utils import FFmpegError, probe as video_probe
 
+from src.ui.dialogs.delete_photo_dialog import add_delete_action
 from src.ui.common import RejectsDialog, TaskWorker, ThumbnailCell, ThumbnailWorker
 from src.ui.theme import NIKON_RED, THUMB_SIZE, pil_to_pixmap
 from src.engine import develop_pipeline as dp
@@ -460,7 +461,7 @@ class CullWorkspace(Workspace):
         self.remove_button = QPushButton("\U0001F5D1 Remove Images")
         self.remove_button.setObjectName("SecondaryButton")
         self.remove_button.setToolTip(
-            "Take every rejected photo out of the project (Shift+Delete). The files stay on "
+            "Take every rejected photo out of the project (Ctrl+Shift+Delete). The files stay on "
             "disk, untouched; View \u25b8 Restore Removed Images brings them back."
         )
         self.remove_button.clicked.connect(self.remove_images)
@@ -472,8 +473,11 @@ class CullWorkspace(Workspace):
             "project in one step. The files stay on disk, untouched.")
         self.clean_up_button.clicked.connect(self.clean_up)
         sel_row.addWidget(self.clean_up_button)
-        for keys in ("Shift+Delete", "Shift+Backspace"):
-            QShortcut(QKeySequence(keys), self, activated=self.remove_images,
+        # Shift+Delete deletes the selected photos (or the one shown) from the
+        # workspace; Ctrl+Shift+Delete removes every rejected one.
+        for keys, slot in (("Shift+Delete", self.delete_photos), ("Shift+Backspace", self.delete_photos),
+                           ("Ctrl+Shift+Delete", self.remove_images), ("Ctrl+Shift+Backspace", self.remove_images)):
+            QShortcut(QKeySequence(keys), self, activated=slot,
                       context=Qt.ShortcutContext.WidgetWithChildrenShortcut)
         # Qt maps Ctrl to Cmd on macOS.
         for keys, slot in (("Ctrl+A", self._on_select_all), ("Ctrl+D", self._on_select_none),
@@ -962,7 +966,16 @@ class CullWorkspace(Workspace):
                                         lambda v=version.id: self.session.set_active_version(key, v))
                 action.setCheckable(True)
                 action.setChecked(version.id == active)
+        menu.addSeparator()
+        add_delete_action(menu, lambda: self.delete_photos(
+            sorted(self.selected) if key in self.selected else [key]))
         return menu
+
+    def delete_photos(self, keys=None) -> int:
+        """Delete Photo (Shift+Delete): the selected photos, or the one shown,
+        leave the workspace after a confirmation; the files stay on disk."""
+        keys = self._mark_targets() if keys is None else list(keys)
+        return self.shell.delete_photos(keys, self._visible_keys())
 
     def _pose_analyzer(self, download_ok: bool = False):
         """The pose analyzer, or None when the body engine is off or absent.
